@@ -79,10 +79,12 @@ async function getPlowData(streetName) {
   // We normalise in JS and use a plain LIKE — the upper() SoQL function
   // call is not supported by this dataset view and causes HTTP 400.
   const normalized = normalizeStreetName(streetName);
+  // $q is Socrata full-text search — no $where, no LIKE, no % wildcards,
+  // no single quotes.  Eliminates every encoding edge-case that caused 400.
   const csclUrl = buildSocrataUrl(CSCL_ENDPOINT, {
     soqlParams: {
+      q:      normalized,
       select: "physicalid,st_label",
-      where:  `st_label like '%${normalized}%' OR full_stree like '%${normalized}%'`,
       limit:  "1",
     },
   });
