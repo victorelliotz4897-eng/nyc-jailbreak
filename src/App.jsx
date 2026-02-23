@@ -3,16 +3,9 @@ import "./index.css";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-// NYC Street Centerline (CSCL) — spatial lookup: address lat/lon → physicalid + street name
-// dpb9-ubdh = CSCL_PlowNYC (purpose-built for PlowNYC); 3mf9-qshr = current general CSCL
-// exjm-f27b was the original but is now deprecated (returns 404)
-const CSCL_ENDPOINTS = [
-  "https://data.cityofnewyork.us/resource/dpb9-ubdh.json",
-  "https://data.cityofnewyork.us/resource/3mf9-qshr.json",
-];
-
-// DSNY PlowNYC — plow activity: physicalid → last visit timestamp
-const PLOWNYC_ENDPOINT = "https://data.cityofnewyork.us/resource/rmhc-afj9.json";
+// ArcGIS Snow Vehicle Activity — single spatial query returns street + plow timestamp
+const ARCGIS_SNOW_ENDPOINT =
+  "https://services.arcgis.com/vls6WvPaHNJ83Spx/ArcGIS/rest/services/Snow_Vehicle_Activity/FeatureServer/0/query";
 
 const NOMINATIM_ENDPOINT = "https://nominatim.openstreetmap.org/search";
 
@@ -55,75 +48,41 @@ async function geocodeAddress(address) {
 }
 
 /**
- * Step 1 of 2: find the nearest NYC street segment for a lat/lon.
- * Tries each CSCL endpoint in order (the old one is deprecated/404).
- * Returns { physicalid, streetName }.
+ * Query the ArcGIS Snow Vehicle Activity layer for the nearest plow record.
+ * Returns the raw ArcGIS JSON response ({ features: [...] }).
  */
-async function findStreetSegment(lat, lon) {
-  const queryEndpoint = async (endpoint, radiusMeters) => {
-    const params = new URLSearchParams({
-      "$where":  `within_circle(the_geom,${lat},${lon},${radiusMeters})`,
-      "$limit":  "1",
-      // Request all likely street-name variants; Socrata silently skips unknown columns
-      "$select": "physicalid,st_label,full_stree,stname_label,streetname",
-    });
-    const res = await fetch(`${endpoint}?${params}`);
-    // 404 means deprecated/gone — signal caller to try next endpoint
-    if (res.status === 404) return null;
-    if (!res.ok) throw new Error(`Street lookup failed: HTTP ${res.status}`);
-    return res.json();
-  };
-
-  for (const endpoint of CSCL_ENDPOINTS) {
-    let rows = await queryEndpoint(endpoint, 200);
-    if (rows === null) continue;              // 404 → try next endpoint
-    if (!rows.length) {
-      rows = await queryEndpoint(endpoint, 600);
-      if (rows === null) continue;
-    }
-    if (rows.length) {
-      const row = rows[0];
-      return {
-        physicalid: row.physicalid,
-        streetName: row.st_label || row.stname_label || row.full_stree || row.streetname || "your street",
-      };
-    }
-  }
-
-  throw new Error("No NYC street found near this address. Make sure to include your borough (e.g., Brooklyn, Manhattan).");
-}
-
-/**
- * Step 2 of 2: look up the DSNY PlowNYC record for the given physicalid.
- * Returns raw attributes shaped as { street_name, last_visited, status }
- * so that evaluateStatus() can consume them unchanged.
- */
-async function queryPlowNYC(physicalid, streetName) {
-  const params = new URLSearchParams({
-    "$where": `physical_id=${physicalid}`,
-    "$limit": "1",
+const fetchPlowStatus = async (lat, lng) => {
+  const geometry = JSON.stringify({
+    x: lng,
+    y: lat,
+    spatialReference: { wkid: 4326 }
   });
-  const res = await fetch(`${PLOWNYC_ENDPOINT}?${params}`);
-  if (!res.ok) throw new Error(`PlowNYC lookup failed: HTTP ${res.status}`);
 
-  const rows = await res.json();
-  if (!rows.length) {
-    // Segment exists but no plow record this storm → treat as pending
-    return { street_name: streetName, last_visited: null, status: "pending" };
-  }
+  const params = new URLSearchParams({
+    f:              'json',
+    geometry:       geometry,
+    geometryType:   'esriGeometryPoint',
+    spatialRel:     'esriSpatialRelIntersects',
+    outFields:      'last_visited,street_name,status',
+    inSR:           '4326',
+    outSR:          '4326',
+    distance:       '100', // Look within 100 meters of the address
+    units:          'esriSRUnit_Meter',
+    returnGeometry: 'false'
+  });
 
-  const r = rows[0];
-  // Try every plausible timestamp field name across dataset versions
-  const last_visited = r.date || r.last_modified || r.lastmodifieddate
-                    || r.last_plow || r.datetime || r.modified || null;
+  const response = await fetch(`${ARCGIS_SNOW_ENDPOINT}?${params.toString()}`);
+  if (!response.ok) throw new Error(`Server Error: ${response.status}`);
+  return await response.json();
+};
 
-  return { street_name: streetName, last_visited, status: "active" };
-}
-
-/** Combines both lookups into one call used by the UI. */
+/** Geocodes the address then fetches plow status; returns raw ArcGIS attributes. */
 async function querySnowActivity(lat, lon) {
-  const { physicalid, streetName } = await findStreetSegment(lat, lon);
-  return queryPlowNYC(physicalid, streetName);
+  const data = await fetchPlowStatus(lat, lon);
+  if (!data.features || !data.features.length) {
+    return { street_name: "your street", last_visited: null, status: "pending" };
+  }
+  return data.features[0].attributes;
 }
 
 // ─── Jailbreak evaluation ─────────────────────────────────────────────────────
@@ -182,8 +141,8 @@ function Header() {
 
       <p className="mt-3 text-gray-500 font-mono text-xs tracking-widest uppercase">
         Powered by&nbsp;
-        <span className="text-yellow-400">DSNY PlowNYC</span>
-        &nbsp;•&nbsp; NYC Open Data
+        <span className="text-yellow-400">NYC Snow Vehicle Activity</span>
+        &nbsp;•&nbsp; ArcGIS FeatureServer
       </p>
     </header>
   );
@@ -326,7 +285,7 @@ function AlertCard({ result }) {
         )}
 
         <p className="mt-5 text-gray-700 text-xs">
-          Source: DSNY PlowNYC · NYC Street Centerline · OpenStreetMap Nominatim
+          Source: NYC Snow Vehicle Activity (ArcGIS) · OpenStreetMap Nominatim
         </p>
       </div>
     </div>
@@ -436,8 +395,8 @@ function HowItWorks() {
         <ol className="space-y-2 text-xs text-gray-600">
           {[
             "Enter address → geocoded via OpenStreetMap Nominatim",
-            "Nearest street segment looked up via NYC Street Centerline (CSCL)",
-            "DSNY PlowNYC checked for that segment's last plow timestamp",
+            "Lat/lon sent to NYC Snow Vehicle Activity (ArcGIS FeatureServer)",
+            "Nearest record within 100 m returns street name + last plow timestamp",
             "<2h = cleared · 2–6h = borderline · >6h / no record = snowed in",
           ].map((step, i) => (
             <li key={i}>
@@ -513,7 +472,7 @@ export default function App() {
       </main>
 
       <footer className="border-t border-gray-900 py-4 text-center font-mono text-xs text-gray-700 tracking-widest uppercase">
-        NYC Jailbreak &nbsp;|&nbsp; Data: DSNY PlowNYC &amp; NYC Open Data &amp; OpenStreetMap &nbsp;|&nbsp; Not affiliated with NYC
+        NYC Jailbreak &nbsp;|&nbsp; Data: NYC Snow Vehicle Activity &amp; OpenStreetMap &nbsp;|&nbsp; Not affiliated with NYC
       </footer>
     </div>
   );
