@@ -3,8 +3,10 @@ import "./index.css";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-// OpenStreetMap Nominatim — address → lat/lon
-const NOMINATIM_ENDPOINT = "https://nominatim.openstreetmap.org/search";
+// NYC GeoSearch (planninglabs.nyc) — address → lat/lon via CSCL
+// Uses the same authoritative NYC address database as the city itself;
+// returns points on the street centerline, not building centroids.
+const GEOSEARCH_ENDPOINT = "https://geosearch.planninglabs.nyc/v2/search";
 // PlowNYC real-time API — lat/lon → last plow timestamp
 const PLOWNYC_REALTIME   = "https://plownyc.cityofnewyork.us/mappingapi/api/highlight/info";
 
@@ -18,28 +20,23 @@ const SIX_HOURS_MS   = 6 * 60 * 60 * 1000;
 // ─── Async helpers ───────────────────────────────────────────────────────────
 
 async function getPlowData(address) {
-  // ── Step 1: Geocode address → lat/lon via Nominatim ──────────────────────
-  // Constrain to NYC bounding box so partial addresses resolve correctly.
+  // ── Step 1: Geocode address → lat/lon via NYC GeoSearch ─────────────────
+  // GeoJSON response: features[0].geometry.coordinates = [lon, lat]
   const geocodeUrl =
-    `${NOMINATIM_ENDPOINT}` +
-    `?q=${encodeURIComponent(address + ", New York City, NY")}` +
-    `&format=json&limit=1&countrycodes=us` +
-    `&viewbox=-74.2591,40.9176,-73.7004,40.4774&bounded=1`;
+    `${GEOSEARCH_ENDPOINT}?text=${encodeURIComponent(address)}&size=1`;
 
   let lat, lon;
   try {
-    console.log("[getPlowData] Nominatim fetch →", geocodeUrl);
-    const geoRes = await fetch(geocodeUrl, {
-      headers: { "User-Agent": "nyc-jailbreak/1.0" },
-    });
+    console.log("[getPlowData] GeoSearch fetch →", geocodeUrl);
+    const geoRes = await fetch(geocodeUrl);
     if (!geoRes.ok) throw new Error(`Geocode error: HTTP ${geoRes.status}`);
-    const geoRows = await geoRes.json();
-    if (!geoRows.length) throw new Error("Address not found. Try including your borough — e.g. Brooklyn, Manhattan.");
-    lat = geoRows[0].lat;
-    lon = geoRows[0].lon;
-    console.log("[getPlowData] Geocode →", lat, lon, geoRows[0].display_name);
+    const geoData  = await geoRes.json();
+    const features = geoData.features ?? [];
+    if (!features.length) throw new Error("Address not found. Try including your borough — e.g. Brooklyn, Manhattan.");
+    [lon, lat] = features[0].geometry.coordinates; // GeoJSON is [lon, lat]
+    console.log("[getPlowData] Geocode →", lat, lon, features[0].properties?.label);
   } catch (err) {
-    console.error("[getPlowData] Nominatim failed:", err);
+    console.error("[getPlowData] GeoSearch failed:", err);
     throw err;
   }
 
@@ -295,7 +292,7 @@ function AlertCard({ result }) {
         )}
 
         <p className="mt-5 text-gray-700 text-xs">
-          Source: PlowNYC Real-Time API · OpenStreetMap Nominatim
+          Source: PlowNYC Real-Time API · NYC GeoSearch
         </p>
       </div>
     </div>
@@ -404,7 +401,7 @@ function HowItWorks() {
         <p className="text-gray-700 text-xs tracking-widest uppercase mb-3">How it works</p>
         <ol className="space-y-2 text-xs text-gray-600">
           {[
-            "Enter your NYC address → geocoded to lat/lon via OpenStreetMap Nominatim",
+            "Enter your NYC address → geocoded to lat/lon via NYC GeoSearch (CSCL)",
             "Coordinates sent to PlowNYC real-time API (same data as maps.nyc.gov/snow)",
             "VisitedTime is UTC — parsed and compared against current time",
             "<3h = cleared · 3–6h = borderline · >6h / no record = snowed in",
@@ -481,7 +478,7 @@ export default function App() {
       </main>
 
       <footer className="border-t border-gray-900 py-4 text-center font-mono text-xs text-gray-700 tracking-widest uppercase">
-        NYC Jailbreak &nbsp;|&nbsp; Data: PlowNYC Real-Time API &amp; OpenStreetMap &nbsp;|&nbsp; Not affiliated with NYC
+        NYC Jailbreak &nbsp;|&nbsp; Data: PlowNYC Real-Time API &amp; NYC GeoSearch &nbsp;|&nbsp; Not affiliated with NYC
       </footer>
     </div>
   );
