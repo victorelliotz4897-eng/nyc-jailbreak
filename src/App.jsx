@@ -39,10 +39,11 @@ async function getPlowData(streetName) {
   // SoQL syntax characters (commas in $select, spaces in $order, etc.)
   // must NOT be encoded — encodeURIComponent(",") = "%2C" breaks $select.
   const normalized = normalizeStreetName(streetName);
+  // No $select — let Socrata return all columns so we can see the exact
+  // field names in the console if anything is wrong.
   const csclUrl =
     `${CSCL_ENDPOINT}` +
     `?$q=${encodeURIComponent(normalized)}` +
-    `&$select=physicalid,st_label` +
     `&$limit=1`;
 
   let csclRows;
@@ -63,7 +64,11 @@ async function getPlowData(streetName) {
 
   if (!csclRows.length) throw new Error("Street name not recognized.");
 
-  const { physicalid, st_label } = csclRows[0];
+  // Log the full row so we can verify the exact column names Socrata returns
+  console.log("[getPlowData] CSCL row keys:", Object.keys(csclRows[0]));
+  const physicalid = csclRows[0].physicalid ?? csclRows[0].physical_id;
+  const st_label   = csclRows[0].st_label   ?? csclRows[0].stlabel ?? csclRows[0].street_label;
+  if (!physicalid) throw new Error("CSCL row missing physical ID — check console for column names.");
 
   // ── Step 2: PlowNYC physicalid → last plow timestamp ──────────────────────
   const plowUrl =
