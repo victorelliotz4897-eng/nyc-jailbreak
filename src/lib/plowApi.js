@@ -29,31 +29,16 @@ async function geocodeNycAddress(query) {
   return geocodeRows[0];
 }
 
-export async function getPlowData(address, selectedSuggestion = null) {
-  let lat;
-  let lon;
+export async function getPlowData(address) {
+  const geocodeMatch =
+    (await geocodeNycAddress(address)) ||
+    (await geocodeNycAddress(`${address}, New York City, NY`));
 
-  const hasSelectedCoordinates =
-    selectedSuggestion &&
-    Number.isFinite(selectedSuggestion.lat) &&
-    Number.isFinite(selectedSuggestion.lon) &&
-    selectedSuggestion.label === address;
-
-  if (hasSelectedCoordinates) {
-    lat = selectedSuggestion.lat;
-    lon = selectedSuggestion.lon;
-  } else {
-    const geocodeMatch =
-      (await geocodeNycAddress(address)) ||
-      (await geocodeNycAddress(`${address}, New York City, NY`));
-
-    if (!geocodeMatch) {
-      throw new Error("Address not found. Please choose a NYC suggestion from the dropdown.");
-    }
-
-    lat = geocodeMatch.lat;
-    lon = geocodeMatch.lon;
+  if (!geocodeMatch) {
+    throw new Error("Address not found. Try including your borough - e.g. Brooklyn, Manhattan.");
   }
+
+  const { lat, lon } = geocodeMatch;
 
   const plowUrl = `${PLOWNYC_REALTIME}?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}&t=${Date.now()}`;
 
