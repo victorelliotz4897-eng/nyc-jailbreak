@@ -85,10 +85,12 @@ async function getPlowData(streetName) {
   const st_label   = csclRows[0].stname_lab;
 
   // ── Step 2: PlowNYC physicalid → last plow timestamp ──────────────────────
+  // Confirmed field name from dataset: 'snapshot' (not 'last_visited').
+  // Ordering by snapshot DESC gives the most recent plow record for this segment.
   const plowUrl =
     `${PLOWNYC_ENDPOINT}` +
     `?physical_id=${encodeURIComponent(physicalid)}` +
-    `&$order=last_visited DESC` +
+    `&$order=snapshot DESC` +
     `&$limit=1`;
 
   let plowRows;
@@ -107,11 +109,8 @@ async function getPlowData(streetName) {
     throw err;
   }
 
-  // Field is 'last_visited' in the SODA API; fall back to 'last_plow_timestamp'
-  // in case NYC Open Data ever renames the column.
-  const lastVisitedRaw = plowRows[0]?.last_visited
-    ?? plowRows[0]?.last_plow_timestamp
-    ?? null;
+  // Confirmed field name from dataset inspection: 'snapshot'.
+  const lastVisitedRaw = plowRows[0]?.snapshot ?? null;
   const lastVisited = lastVisitedRaw ? new Date(lastVisitedRaw) : null;
   const isPlowed    = lastVisited
     ? (Date.now() - lastVisited.getTime()) <= 180 * 60 * 1000
