@@ -3,169 +3,125 @@ import "./index.css";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-// ArcGIS Snow Vehicle Activity — single spatial query returns street + plow timestamp
-const ARCGIS_SNOW_ENDPOINT =
-  "https://services.arcgis.com/vls6WvPaHNJ83Spx/ArcGIS/rest/services/Snow_Vehicle_Activity/FeatureServer/0/query";
-
-const NOMINATIM_ENDPOINT = "https://nominatim.openstreetmap.org/search";
+// NYC Street Centerline (CSCL) — street name → physicalid
+const CSCL_ENDPOINT    = "https://data.cityofnewyork.us/resource/dpb9-ubdh.json";
+// DSNY PlowNYC — physicalid → last plow timestamp
+const PLOWNYC_ENDPOINT = "https://data.cityofnewyork.us/resource/rmhc-afj9.json";
 
 const PARTYPLACE_CLEARED_URL = "https://www.partyplace.com/?ref=nyc-jailbreak-cleared";
 const PARTYPLACE_SNOWED_URL  = "https://www.partyplace.com/?ref=nyc-jailbreak-snowed";
 
-const TWO_HOURS_MS        = 2 * 60 * 60 * 1000;
-const SIX_HOURS_MS        = 6 * 60 * 60 * 1000;
-// ArcGIS stores timestamps in Eastern Time but labels them as UTC.
-// Add 4 hours to shift ET → UTC before comparing against Date.now().
-const ARCGIS_UTC_OFFSET_MS = 4 * 60 * 60 * 1000;
+// YES threshold (spec): plowed within 3 h → cleared
+const THREE_HOURS_MS = 3 * 60 * 60 * 1000;
+const SIX_HOURS_MS   = 6 * 60 * 60 * 1000;
 
 // ─── Async helpers ───────────────────────────────────────────────────────────
 
 /**
- * Geocode a plain-text address to {lat, lon} using Nominatim (OpenStreetMap).
- * Appends ", New York City" if no borough info detected, to bias results toward NYC.
+ * Step 1 — Street name → physicalid via the NYC Street Centerline (CSCL).
+ * Searches both the abbreviated label (st_label, e.g. "E 9 ST") and the
+ * full name (full_stree, e.g. "EAST 9 STREET") with a substring match.
+ * Returns up to 5 candidates; picks the first one.
  */
-async function geocodeAddress(address) {
-  const query = /new york|nyc|brooklyn|queens|bronx|manhattan|staten island/i.test(address)
-    ? address
-    : `${address}, New York City`;
+async function findStreetByName(input) {
+  // Strip a leading house number so "30 East 9 St" searches "East 9 St"
+  const streetOnly = input.replace(/^\d+\s+/, "").trim();
 
   const params = new URLSearchParams({
-    q:              query,
-    format:         "json",
-    addressdetails: "1",
-    limit:          "1",
+    "$where":  `st_label like '%${streetOnly}%' OR full_stree like '%${streetOnly}%'`,
+    "$select": "physicalid,st_label,full_stree",
+    "$limit":  "5",
   });
 
-  const res = await fetch(`${NOMINATIM_ENDPOINT}?${params}`, {
-    headers: { "Accept-Language": "en" },
-  });
+  const res = await fetch(`${CSCL_ENDPOINT}?${params}`);
+  if (!res.ok) throw new Error(`Street lookup failed: HTTP ${res.status}`);
 
-  if (!res.ok) throw new Error(`Geocoding failed: HTTP ${res.status}`);
+  const rows = await res.json();
+  console.table(rows); // debug: inspect raw CSCL candidates
 
-  const data = await res.json();
-  if (!data.length) {
-    throw new Error("Address not found. Try adding a borough (e.g., Brooklyn, Queens).");
+  if (!rows.length) {
+    throw new Error(
+      `No street found for "${streetOnly}". ` +
+      `Try an abbreviated name like "E 9 St" or "Broadway".`
+    );
   }
 
-  return { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon) };
+  // If multiple boroughs returned, surface a hint but still proceed with first
+  if (rows.length > 1) {
+    console.info(
+      `${rows.length} street segments matched — using first result. ` +
+      `Add a borough (e.g. "East 9 St, Manhattan") to narrow it down.`
+    );
+  }
+
+  const row = rows[0];
+  return {
+    physicalid: row.physicalid,
+    streetName: row.st_label || row.full_stree || streetOnly,
+  };
 }
 
 /**
- * Query the ArcGIS Snow Vehicle Activity layer for the nearest plow record.
- * Returns the raw ArcGIS JSON response ({ features: [...] }).
+ * Step 2 — physicalid → last plow timestamp via the DSNY PlowNYC dataset.
+ * Returns the raw Socrata row merged with a _source tag for evaluateStatus.
  */
-const fetchPlowStatus = async (lat, lng) => {
-  // Build a bounding-box envelope ≈ 150 m around the geocoded point.
-  // esriGeometryEnvelope is more universally supported than esriGeometryPoint+distance,
-  // and avoids "distance/units not supported" errors on some ArcGIS services.
-  const R = 150; // metres radius
-  const latDelta = R / 111320;
-  const lonDelta = R / (111320 * Math.cos(lat * Math.PI / 180));
-
-  const geometry = JSON.stringify({
-    xmin: lng - lonDelta,
-    ymin: lat - latDelta,
-    xmax: lng + lonDelta,
-    ymax: lat + latDelta,
-    spatialReference: { wkid: 4326 },
-  });
-
+async function queryPlowNYC(physicalid, streetName) {
   const params = new URLSearchParams({
-    f:              'json',
-    geometry:       geometry,
-    geometryType:   'esriGeometryEnvelope',
-    spatialRel:     'esriSpatialRelIntersects',
-    outFields:      'last_visited,street_name,status',
-    inSR:           '4326',
-    outSR:          '4326',
-    orderByFields:  'last_visited DESC', // most recently plowed segment first
-    returnGeometry: 'false',
+    "physical_id": physicalid,
+    "$order":      "last_visited DESC",
+    "$limit":      "1",
   });
 
-  const response = await fetch(`${ARCGIS_SNOW_ENDPOINT}?${params.toString()}`);
-  if (!response.ok) throw new Error(`ArcGIS server error: HTTP ${response.status}`);
+  const res = await fetch(`${PLOWNYC_ENDPOINT}?${params}`);
+  if (!res.ok) throw new Error(`PlowNYC lookup failed: HTTP ${res.status}`);
 
-  const data = await response.json();
+  const rows = await res.json();
+  console.table(rows); // debug: inspect raw PlowNYC record
 
-  // ArcGIS returns errors as JSON with HTTP 200 — surface them explicitly
-  if (data.error) {
-    throw new Error(`ArcGIS error ${data.error.code}: ${data.error.message}`);
+  if (!rows.length) {
+    return { street_name: streetName, last_visited: null, _source: "no_record" };
   }
 
-  return data;
-};
+  return { ...rows[0], street_name: streetName, _source: "record" };
+}
 
-/** Fetches plow status and tags the result with _source for evaluateStatus. */
-async function querySnowActivity(lat, lon) {
-  const data = await fetchPlowStatus(lat, lon);
-  if (!data.features || !data.features.length) {
-    // No ArcGIS features within radius → nothing nearby at all
-    return { _source: "no_features", street_name: "your street", last_visited: null, status: null };
-  }
-  // Features found — block may still be pending within those features
-  return { ...data.features[0].attributes, _source: "features" };
+/** Orchestrates the two-step CSCL → PlowNYC lookup. */
+async function querySnowActivity(input) {
+  const { physicalid, streetName } = await findStreetByName(input);
+  return queryPlowNYC(physicalid, streetName);
 }
 
 // ─── Jailbreak evaluation ─────────────────────────────────────────────────────
 
 /**
- * Determine jailbreak status from raw ArcGIS attributes.
+ * Determine jailbreak status from a raw Socrata PlowNYC row.
  *
- * Status codes (from the official PlowNYC map):
- *   1 / "Recently Serviced"     → cleared     ("FREEDOM. Plowed in the last hour.")
- *   2 / "Serviced 1-6 hours ago"→ borderline  ("CLEAR. Plowed recently.")
- *   3                           → crunchy     ("CRUNCHY. Plowed over 6 hours ago.")
- *   0 / null                    → fall back to last_visited timestamp age
- *   "Pending" (with features)   → neighborhood ("Put the kettle on.")
- *   no features at all          → snowed_in
+ * Socrata returns last_visited as an ISO-8601 string (already in UTC).
+ * Thresholds (per spec):
+ *   YES  — plowed within the last 3 h  → "cleared"
+ *   BORDERLINE — 3–6 h ago             → "borderline"
+ *   CRUNCHY    — > 6 h ago             → "crunchy"
+ *   no record found                    → "snowed_in"
  *
- * Returns { status: "cleared"|"borderline"|"crunchy"|"neighborhood"|"snowed_in",
+ * Returns { status: "cleared"|"borderline"|"crunchy"|"snowed_in",
  *           lastVisited: Date|null, streetName: string }
  */
 function evaluateStatus(attributes) {
-  const streetName     = attributes.street_name || attributes.STREET_NAME || "your street";
-  const statusRaw      = attributes.status ?? attributes.STATUS;
-  const statusNum      = Number(statusRaw);                                  // NaN if string
-  const statusStr      = typeof statusRaw === "string" ? statusRaw.toLowerCase() : "";
-  const lastVisitedRaw = attributes.last_visited ?? attributes.LAST_VISITED;
+  const streetName     = attributes.street_name || "your street";
+  const lastVisitedRaw = attributes.last_visited;
 
-  // Shift ArcGIS ET-stored-as-UTC timestamps to true UTC before age comparison
-  const parseTs = (raw) => (raw != null ? new Date(Number(raw) + ARCGIS_UTC_OFFSET_MS) : null);
-
-  // ── No features within radius → definitively nothing nearby ──────────────
-  if (attributes._source === "no_features") {
+  // No PlowNYC record for this segment this storm
+  if (attributes._source === "no_record" || !lastVisitedRaw) {
     return { status: "snowed_in", lastVisited: null, streetName };
   }
 
-  // ── Features found but block explicitly pending → plow is close ──────────
-  if (statusStr === "pending") {
-    return { status: "neighborhood", lastVisited: null, streetName };
-  }
-
-  // ── Status 1 / "Recently Serviced" → FREEDOM ─────────────────────────────
-  if (statusNum === 1 || statusStr.includes("recently serviced")) {
-    return { status: "cleared", lastVisited: parseTs(lastVisitedRaw), streetName };
-  }
-
-  // ── Status 2 / "Serviced 1-6 hours ago" → CLEAR ──────────────────────────
-  if (statusNum === 2 || statusStr.includes("serviced 1")) {
-    return { status: "borderline", lastVisited: parseTs(lastVisitedRaw), streetName };
-  }
-
-  // ── Status 3 → CRUNCHY ───────────────────────────────────────────────────
-  if (statusNum === 3) {
-    return { status: "crunchy", lastVisited: parseTs(lastVisitedRaw), streetName };
-  }
-
-  // ── Status 0 / null / unknown → fall back to timestamp age ───────────────
-  if (!lastVisitedRaw) {
-    return { status: "snowed_in", lastVisited: null, streetName };
-  }
-  const lastVisited = parseTs(lastVisitedRaw);
+  // Socrata timestamps are ISO-8601 UTC strings — new Date() parses them correctly
+  const lastVisited = new Date(lastVisitedRaw);
   const ageMs = Date.now() - lastVisited.getTime();
-  if (ageMs <= TWO_HOURS_MS) return { status: "cleared",    lastVisited, streetName };
-  if (ageMs <= SIX_HOURS_MS) return { status: "borderline", lastVisited, streetName };
-  return                            { status: "crunchy",     lastVisited, streetName };
+
+  if (ageMs <= THREE_HOURS_MS) return { status: "cleared",    lastVisited, streetName };
+  if (ageMs <= SIX_HOURS_MS)   return { status: "borderline", lastVisited, streetName };
+  return                               { status: "crunchy",    lastVisited, streetName };
 }
 
 function formatTime(date) {
@@ -478,10 +434,10 @@ function HowItWorks() {
         <p className="text-gray-700 text-xs tracking-widest uppercase mb-3">How it works</p>
         <ol className="space-y-2 text-xs text-gray-600">
           {[
-            "Enter address → geocoded via OpenStreetMap Nominatim",
-            "Lat/lon sent to NYC Snow Vehicle Activity (ArcGIS FeatureServer)",
-            "Nearest record within 100 m returns street name + last plow timestamp",
-            "<2h = cleared · 2–6h = borderline · >6h / no record = snowed in",
+            "Enter a street name → looked up in NYC Street Centerline (CSCL) for physicalid",
+            "physicalid used to query DSNY PlowNYC dataset for last plow timestamp",
+            "Socrata returns ISO-8601 UTC timestamp — compared against current time",
+            "<3h = cleared · 3–6h = borderline · >6h / no record = snowed in",
           ].map((step, i) => (
             <li key={i}>
               <span className="text-gray-800 mr-2">{String(i + 1).padStart(2, "0")}.</span>
@@ -507,9 +463,8 @@ export default function App() {
     setError(null);
 
     try {
-      const { lat, lon }  = await geocodeAddress(address);
-      const attributes    = await querySnowActivity(lat, lon);
-      const evaluation    = evaluateStatus(attributes);
+      const attributes = await querySnowActivity(address);
+      const evaluation = evaluateStatus(attributes);
       setResult(evaluation);
     } catch (err) {
       setError(err.message || "An unexpected error occurred.");
