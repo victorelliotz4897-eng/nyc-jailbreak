@@ -56,15 +56,33 @@ function buildSocrataUrl(base, { soqlParams = {}, filterParams = {} } = {}) {
  *   result   — stores the evaluateStatus() output derived from the return value
  *   error    — stores the thrown error message on failure
  */
+/**
+ * Normalise free-text street input into the uppercase form that NYC CSCL
+ * stores in st_label / full_stree.
+ *
+ *   "30 East 9th Street"  →  "EAST 9 STREET"
+ *   "west 57th st"        →  "WEST 57 ST"
+ *   "Broadway"            →  "BROADWAY"
+ */
+function normalizeStreetName(input) {
+  return input
+    .trim()
+    .replace(/^\d+\s+/, "")                      // strip house number: "30 East…" → "East…"
+    .replace(/\b(\d+)(?:st|nd|rd|th)\b/gi, "$1") // ordinals: "9th" → "9", "1st" → "1"
+    .trim()
+    .toUpperCase();
+}
+
 async function getPlowData(streetName) {
   // ── Step 1: CSCL street-name → physicalid ────────────────────────────────
-  // upper() makes the LIKE match case-insensitive on the Socrata side.
-  // The % wildcards survive encodeURIComponent as %25, which the server
-  // URL-decodes back to % before the SoQL parser sees them.
+  // NYC CSCL stores names in uppercase ("E 9 ST", "EAST 9 STREET").
+  // We normalise in JS and use a plain LIKE — the upper() SoQL function
+  // call is not supported by this dataset view and causes HTTP 400.
+  const normalized = normalizeStreetName(streetName);
   const csclUrl = buildSocrataUrl(CSCL_ENDPOINT, {
     soqlParams: {
       select: "physicalid,st_label",
-      where:  `upper(st_label) like upper('%${streetName}%')`,
+      where:  `st_label like '%${normalized}%' OR full_stree like '%${normalized}%'`,
       limit:  "1",
     },
   });
