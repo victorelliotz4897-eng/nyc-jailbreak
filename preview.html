@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Can I Go Outside? | NYC Storm Utility</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Dela+Gothic+One&family=Montserrat:wght@500;700;900&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-dark: #111111;
+            --text-light: #F0F0F0;
+            --accent-red: #D92525;
+            --ice-blue: #00F0FF;
+            --safety-orange: #FF4800;
+            --font-display: 'Dela Gothic One', cursive;
+            --font-ui: 'Montserrat', sans-serif;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background-color: var(--bg-dark);
+            color: var(--text-light);
+            font-family: var(--font-ui);
+            overflow-x: hidden;
+            -webkit-font-smoothing: antialiased;
+            background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.05'/%3E%3C/svg%3E");
+            min-height: 100vh;
+        }
+        #snow-canvas {
+            position: fixed; top: 0; left: 0;
+            width: 100%; height: 100%;
+            pointer-events: none; z-index: 50;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 40px 24px;
+            position: relative;
+            z-index: 10;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+        h1, h2 { font-family: var(--font-display); text-transform: uppercase; line-height: 0.9; }
+        .label-text {
+            font-family: var(--font-ui);
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            font-size: 0.8rem;
+        }
+
+        /* ── Landing ── */
+        #landing-view {
+            text-align: center;
+            align-items: center;
+            gap: 2rem;
+            transition: opacity 0.5s ease;
+        }
+        .hero-title {
+            font-size: clamp(3rem, 8vw, 6rem);
+            transform: rotate(-2deg);
+            text-shadow: 4px 4px 0px #000;
+            margin-bottom: 1rem;
+        }
+        .hero-tagline {
+            font-size: 1.2rem;
+            max-width: 600px;
+            line-height: 1.5;
+            font-weight: 500;
+            opacity: 0.9;
+        }
+        .storm-advisory {
+            background-color: var(--accent-red);
+            color: var(--text-light);
+            padding: 12px 24px;
+            font-family: var(--font-display);
+            font-size: 1.5rem;
+            transform: rotate(1deg);
+            display: inline-block;
+            box-shadow: 8px 8px 0px rgba(0,0,0,0.5);
+            margin-bottom: 2rem;
+        }
+        .search-container {
+            position: relative;
+            width: 100%;
+            max-width: 600px;
+        }
+        input[type="text"] {
+            width: 100%;
+            background: transparent;
+            border: none;
+            border-bottom: 4px solid var(--text-light);
+            color: var(--text-light);
+            font-family: var(--font-ui);
+            font-size: 1.5rem;
+            padding: 20px 5rem 20px 0;
+            outline: none;
+            transition: all 0.3s ease;
+            border-radius: 0;
+        }
+        input[type="text"]::placeholder {
+            color: rgba(240, 240, 240, 0.5);
+            font-family: var(--font-display);
+            text-transform: uppercase;
+        }
+        input[type="text"]:focus {
+            border-color: var(--accent-red);
+            padding-left: 20px;
+        }
+        .search-btn {
+            position: absolute;
+            right: 0;
+            top: 50%;
+            transform: translateY(-50%);
+            background: transparent;
+            border: none;
+            color: var(--text-light);
+            font-family: var(--font-display);
+            font-size: 1.2rem;
+            cursor: pointer;
+            text-transform: uppercase;
+            padding: 0;
+            transition: color 0.2s;
+        }
+        .search-btn:hover { color: var(--accent-red); }
+        .logo-footer {
+            margin-top: 4rem;
+            font-size: 0.8rem;
+            opacity: 0.6;
+            letter-spacing: 1px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .logo-circle {
+            width: 30px; height: 30px;
+            background: var(--accent-red);
+            border-radius: 50%;
+            display: inline-block;
+            flex-shrink: 0;
+        }
+
+        /* ── Autocomplete ── */
+        .autocomplete-list {
+            position: absolute;
+            top: 100%; left: 0;
+            width: 100%;
+            background: #1a1a1a;
+            border: 1px solid rgba(240,240,240,0.15);
+            border-top: none;
+            list-style: none;
+            z-index: 100;
+            max-height: 240px;
+            overflow-y: auto;
+            display: none;
+        }
+        .autocomplete-list.visible { display: block; }
+        .autocomplete-list li {
+            padding: 12px 20px;
+            font-family: var(--font-ui);
+            font-size: 0.95rem;
+            cursor: pointer;
+            border-bottom: 1px solid rgba(240,240,240,0.05);
+            transition: background 0.15s;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .autocomplete-list li:hover, .autocomplete-list li.active {
+            background: var(--accent-red);
+            color: var(--text-light);
+        }
+
+        /* ── Result ── */
+        #result-view { display: none; opacity: 0; transition: opacity 0.8s ease; }
+        .status-hero {
+            position: relative;
+            padding: 4rem 0;
+            text-align: left;
+            border-bottom: 2px solid rgba(255,255,255,0.1);
+        }
+        .big-answer {
+            font-family: var(--font-display);
+            text-transform: uppercase;
+            font-size: clamp(8rem, 20vw, 18rem);
+            line-height: 0.8;
+            margin-left: -10px;
+            color: var(--text-light);
+            text-shadow: 5px 5px 0px rgba(0,0,0,0.5);
+        }
+        .plow-data {
+            font-family: 'Courier New', monospace;
+            margin-top: 2rem;
+            padding-left: 10px;
+            border-left: 4px solid var(--text-light);
+            font-size: 0.9rem;
+            line-height: 1.6;
+            transition: border-left-color 0.5s ease;
+        }
+        .reset-search {
+            margin-top: 2rem;
+            background: none;
+            border: 2px solid var(--text-light);
+            color: var(--text-light);
+            padding: 10px 20px;
+            font-family: var(--font-ui);
+            font-weight: 700;
+            text-transform: uppercase;
+            cursor: pointer;
+            transition: background 0.2s, color 0.2s;
+        }
+        .reset-search:hover { background: var(--text-light); color: var(--bg-dark); }
+        .cards-section { padding-top: 4rem; padding-bottom: 4rem; }
+        .partyplace-btn {
+            display: inline-block;
+            background: var(--accent-red);
+            color: var(--text-light);
+            font-family: var(--font-display);
+            font-size: 1.4rem;
+            text-transform: uppercase;
+            text-decoration: none;
+            padding: 20px 48px;
+            box-shadow: 6px 6px 0px rgba(0,0,0,0.5);
+            transition: transform 0.15s ease, box-shadow 0.15s ease;
+            letter-spacing: 0.02em;
+        }
+        .partyplace-btn:hover { transform: translate(-3px,-3px); box-shadow: 9px 9px 0px rgba(0,0,0,0.5); }
+
+        /* ── Body states ── */
+        body.state-yes { background: radial-gradient(circle at top right, rgba(0,240,255,0.2), transparent 60%), var(--bg-dark); }
+        body.state-yes .big-answer { color: var(--ice-blue); }
+        body.state-yes .plow-data { border-left-color: var(--ice-blue); }
+        body.state-no { background: radial-gradient(circle at top right, rgba(255,72,0,0.2), transparent 60%), var(--bg-dark); }
+        body.state-no .big-answer { color: var(--safety-orange); }
+        body.state-no .plow-data { border-left-color: var(--safety-orange); }
+
+        /* ── Animations ── */
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+        /* ── Responsive ── */
+        @media (max-width: 768px) {
+            .hero-title { font-size: 3.5rem; }
+            .big-answer { font-size: 25vw; }
+            .partyplace-btn { font-size: 1.1rem; padding: 16px 32px; }
+        }
+    </style>
+</head>
+<body>
+    <canvas id="snow-canvas"></canvas>
+
+    <div class="container" id="landing-view">
+        <div class="storm-advisory">STORM ADVISORY: 8–14 IN. EXPECTED</div>
+        <h1 class="hero-title">CAN I GO<br>OUTSIDE?</h1>
+        <p class="hero-tagline">
+            Check if your NYC street has been plowed.<br>Real-time data, no fluff.
+        </p>
+        <div class="search-container" id="search-wrapper">
+            <input type="text" id="address-input" placeholder="ENTER YOUR NYC ADDRESS..." autocomplete="off">
+            <button class="search-btn" id="check-btn">CHECK</button>
+            <ul class="autocomplete-list" id="autocomplete-list"></ul>
+        </div>
+        <div class="logo-footer">
+            <span class="logo-circle"></span>
+            POWERED BY PARTYPLACE.COM
+        </div>
+    </div>
+
+    <div class="container" id="result-view">
+        <div class="status-hero">
+            <div class="label-text">CURRENT STATUS</div>
+            <div class="big-answer" id="status-text">YES.</div>
+            <div class="plow-data" id="plow-data-block">
+                PLOWED IN THE LAST 3 HOURS.<br>
+                LAST VISITED AT <span id="time-stamp">—</span>.<br>
+                <span id="street-name" style="display:none"></span>
+                <span style="opacity:0.5;font-size:0.7em">SOURCE: PLOWNYC REAL-TIME API · OPENSTREETMAP NOMINATIM</span>
+            </div>
+            <button class="reset-search" id="reset-btn">SEARCH ANOTHER</button>
+        </div>
+        <div class="cards-section">
+            <p id="cta-tagline" style="margin-bottom:2rem;opacity:0.7;font-size:0.95rem;letter-spacing:0.05em">
+                Stuck inside? Find a warm venue near you.
+            </p>
+            <a href="https://www.partyplace.com/?ref=nyc-jailbreak" target="_blank" rel="noopener noreferrer" class="partyplace-btn">
+                FIND A VENUE ON PARTYPLACE →
+            </a>
+        </div>
+    </div>
+
+    <script>
+        // ── Snow ─────────────────────────────────────────────────────────────
+        const canvas = document.getElementById('snow-canvas');
+        const ctx = canvas.getContext('2d');
+        let width, height;
+        const particles = [];
+
+        function resize() { width = canvas.width = window.innerWidth; height = canvas.height = window.innerHeight; }
+        function makeFlake() {
+            return { x: Math.random()*width, y: Math.random()*height, vx: (Math.random()-0.5), vy: Math.random()*2+1, size: Math.random()*3+1 };
+        }
+        function animate() {
+            ctx.clearRect(0,0,width,height);
+            for (const p of particles) {
+                p.x += p.vx; p.y += p.vy;
+                if (p.y > height) { p.y = -10; p.x = Math.random()*width; }
+                ctx.beginPath(); ctx.arc(p.x,p.y,p.size,0,Math.PI*2);
+                ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.fill();
+            }
+            requestAnimationFrame(animate);
+        }
+        resize();
+        for (let i=0; i<100; i++) particles.push(makeFlake());
+        animate();
+        window.addEventListener('resize', resize);
+
+        // ── Constants ────────────────────────────────────────────────────────
+        const NOMINATIM = 'https://nominatim.openstreetmap.org/search';
+        const PLOWNYC   = 'https://plownyc.cityofnewyork.us/mappingapi/api/highlight/info';
+        const GEOSEARCH = 'https://geosearch.planninglabs.nyc/v2/autocomplete';
+        const THREE_H   = 3*60*60*1000;
+        const SIX_H     = 6*60*60*1000;
+
+        const landingView  = document.getElementById('landing-view');
+        const resultView   = document.getElementById('result-view');
+        const statusText   = document.getElementById('status-text');
+        const timeStamp    = document.getElementById('time-stamp');
+        const streetName   = document.getElementById('street-name');
+        const plowBlock    = document.getElementById('plow-data-block');
+        const ctaTagline   = document.getElementById('cta-tagline');
+        const addressInput = document.getElementById('address-input');
+        const checkBtn     = document.getElementById('check-btn');
+        const resetBtn     = document.getElementById('reset-btn');
+        const acList       = document.getElementById('autocomplete-list');
+
+        let debounceTimer = null;
+        let activeIdx = -1;
+        let suggestions = [];
+
+        // ── Autocomplete ─────────────────────────────────────────────────────
+        addressInput.addEventListener('input', () => {
+            const val = addressInput.value.trim();
+            activeIdx = -1;
+            clearTimeout(debounceTimer);
+            if (val.length < 3) { hideSuggestions(); return; }
+            debounceTimer = setTimeout(async () => {
+                try {
+                    const res = await fetch(`${GEOSEARCH}?text=${encodeURIComponent(val)}&size=5`);
+                    if (!res.ok) return;
+                    const data = await res.json();
+                    suggestions = (data.features ?? []).map(f => f.properties.label);
+                    renderSuggestions();
+                } catch {}
+            }, 200);
+        });
+
+        function renderSuggestions() {
+            acList.innerHTML = '';
+            if (!suggestions.length) { hideSuggestions(); return; }
+            suggestions.forEach((label, i) => {
+                const li = document.createElement('li');
+                li.textContent = label;
+                li.addEventListener('mousedown', () => pickSuggestion(label));
+                acList.appendChild(li);
+            });
+            acList.classList.add('visible');
+        }
+        function hideSuggestions() { acList.classList.remove('visible'); suggestions = []; }
+        function pickSuggestion(label) { addressInput.value = label; hideSuggestions(); }
+
+        addressInput.addEventListener('keydown', e => {
+            if (!acList.classList.contains('visible') || !suggestions.length) return;
+            if (e.key === 'ArrowDown') { e.preventDefault(); activeIdx = Math.min(activeIdx+1, suggestions.length-1); highlightItem(); }
+            else if (e.key === 'ArrowUp') { e.preventDefault(); activeIdx = Math.max(activeIdx-1, -1); highlightItem(); }
+            else if (e.key === 'Enter' && activeIdx >= 0) { e.preventDefault(); pickSuggestion(suggestions[activeIdx]); }
+            else if (e.key === 'Escape') hideSuggestions();
+        });
+        function highlightItem() {
+            [...acList.children].forEach((li,i) => li.classList.toggle('active', i===activeIdx));
+        }
+        document.addEventListener('mousedown', e => {
+            if (!document.getElementById('search-wrapper').contains(e.target)) hideSuggestions();
+        });
+
+        // ── API helpers ──────────────────────────────────────────────────────
+        async function getPlowData(address) {
+            const geoUrl = `${NOMINATIM}?q=${encodeURIComponent(address+', New York City, NY')}&format=json&limit=1&countrycodes=us&viewbox=-74.2591,40.9176,-73.7004,40.4774&bounded=1`;
+            const geoRes = await fetch(geoUrl, { headers: { 'User-Agent': 'nyc-jailbreak/1.0' } });
+            if (!geoRes.ok) throw new Error(`Geocode error: HTTP ${geoRes.status}`);
+            const rows = await geoRes.json();
+            if (!rows.length) throw new Error('Address not found. Try including your borough — e.g. Brooklyn, Manhattan.');
+            const { lat, lon } = rows[0];
+            const plowUrl = `${PLOWNYC}?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}&t=${Date.now()}`;
+            const plowRes = await fetch(plowUrl);
+            if (!plowRes.ok) throw new Error(`PlowNYC error: HTTP ${plowRes.status}`);
+            const text = await plowRes.text();
+            const data = text.trim() ? JSON.parse(text) : {};
+            const lastVisited = data.VisitedTime ? new Date(data.VisitedTime) : null;
+            const isPlowed = lastVisited ? (Date.now() - lastVisited.getTime()) <= THREE_H : false;
+            return { street: data.Street ?? address, lastVisited, isPlowed };
+        }
+
+        function evaluateStatus({ street, lastVisited, isPlowed }) {
+            if (!lastVisited) return { answer: 'NO', street, lastVisited: null, detail: 'No plow record found for this segment.' };
+            const age = Date.now() - lastVisited.getTime();
+            if (isPlowed) return { answer: 'YES', street, lastVisited, detail: 'Plowed in the last 3 hours.' };
+            if (age <= SIX_H) return { answer: 'YES', street, lastVisited, detail: 'Plowed in the last 6 hours.' };
+            return { answer: 'NO', street, lastVisited, detail: 'Last plowed over 6 hours ago.' };
+        }
+
+        function formatTime(date) {
+            return date ? date.toLocaleTimeString('en-US', { hour:'2-digit', minute:'2-digit', hour12:true, timeZoneName:'short' }) : 'unknown';
+        }
+
+        // ── Search flow ──────────────────────────────────────────────────────
+        async function triggerSearch() {
+            const addr = addressInput.value.trim();
+            if (!addr || checkBtn.disabled) return;
+            hideSuggestions();
+            checkBtn.disabled = true;
+            checkBtn.textContent = '...';
+            landingView.style.opacity = '0';
+
+            try {
+                const [plowData] = await Promise.all([
+                    getPlowData(addr),
+                    new Promise(r => setTimeout(r, 400))
+                ]);
+                const ev = evaluateStatus(plowData);
+
+                document.body.className = '';
+                statusText.textContent = ev.answer + '.';
+                timeStamp.textContent = ev.lastVisited ? formatTime(ev.lastVisited) : '—';
+                if (ev.street) {
+                    streetName.textContent = ev.street.toUpperCase();
+                    streetName.style.display = 'block';
+                }
+                plowBlock.childNodes[0].textContent = ev.detail.toUpperCase() + '\n';
+                ctaTagline.textContent = ev.answer === 'YES'
+                    ? 'Roads are passable. Time to celebrate.'
+                    : 'Stuck inside? Find a warm venue near you.';
+                document.body.classList.add(ev.answer === 'YES' ? 'state-yes' : 'state-no');
+
+                landingView.style.display = 'none';
+                resultView.style.display = 'flex';
+                setTimeout(() => resultView.style.opacity = '1', 50);
+            } catch (err) {
+                document.body.className = '';
+                statusText.textContent = 'OOPS.';
+                statusText.style.fontSize = 'clamp(5rem, 12vw, 10rem)';
+                statusText.style.color = 'var(--safety-orange)';
+                plowBlock.textContent = err.message;
+                plowBlock.style.borderLeftColor = 'var(--safety-orange)';
+                landingView.style.display = 'none';
+                resultView.style.display = 'flex';
+                setTimeout(() => resultView.style.opacity = '1', 50);
+            } finally {
+                checkBtn.disabled = false;
+                checkBtn.textContent = 'CHECK';
+            }
+        }
+
+        function resetSearch() {
+            resultView.style.opacity = '0';
+            setTimeout(() => {
+                resultView.style.display = 'none';
+                landingView.style.display = 'flex';
+                addressInput.value = '';
+                statusText.style.fontSize = '';
+                statusText.style.color = '';
+                plowBlock.style.borderLeftColor = '';
+                streetName.style.display = 'none';
+                document.body.className = '';
+                setTimeout(() => landingView.style.opacity = '1', 50);
+            }, 500);
+        }
+
+        checkBtn.addEventListener('click', triggerSearch);
+        resetBtn.addEventListener('click', resetSearch);
+        addressInput.addEventListener('keypress', e => { if (e.key === 'Enter') triggerSearch(); });
+    </script>
+</body>
+</html>
