@@ -50,18 +50,19 @@ function normalizeStreetName(input) {
 
 async function getPlowData(streetName) {
   // ── Step 1: CSCL street-name → physicalid ────────────────────────────────
-  // IMPORTANT: only encodeURIComponent the user-supplied value.
-  // SoQL syntax characters (commas in $select, spaces in $order, etc.)
-  // must NOT be encoded — encodeURIComponent(",") = "%2C" breaks $select.
-  // Confirmed column names from dataset inspection:
-  //   physicalid  — street segment ID (joins to PlowNYC physical_id)
-  //   stname_lab  — street label, e.g. "EAST 9 STREET"  (NOT "st_label")
+  // Parse house number BEFORE normalization so we can pick the right block.
+  const houseNum = parseInt(streetName.trim().match(/^(\d+)/)?.[1] ?? "0", 10);
   const normalized = normalizeStreetName(streetName);
+
+  // Use exact $where match (NOT $q) so we get ALL segments of this street.
+  // Also fetch l_low_hn/l_high_hn/r_low_hn/r_high_hn for house-number filtering.
+  // encodeURIComponent on the value encodes spaces as %20; Socrata decodes them
+  // before parsing SoQL, so the server sees: stname_lab='E 9 ST'  ✓
   const csclUrl =
     `${CSCL_ENDPOINT}` +
-    `?$q=${encodeURIComponent(normalized)}` +
-    `&$select=physicalid,stname_lab` +
-    `&$limit=1`;
+    `?$where=stname_lab='${encodeURIComponent(normalized)}'` +
+    `&$select=physicalid,stname_lab,l_low_hn,l_high_hn,r_low_hn,r_high_hn` +
+    `&$limit=100`;
 
   let csclRows;
   try {
@@ -81,8 +82,24 @@ async function getPlowData(streetName) {
 
   if (!csclRows.length) throw new Error("Street name not recognized.");
 
-  const physicalid = csclRows[0].physicalid;
-  const st_label   = csclRows[0].stname_lab;
+  // Pick the segment whose house-number range contains the queried house number.
+  // Falls back to csclRows[0] if no range matches (e.g. street-only input).
+  let bestRow = csclRows[0];
+  if (houseNum > 0) {
+    const match = csclRows.find(row => {
+      const lLow  = parseInt(row.l_low_hn,  10);
+      const lHigh = parseInt(row.l_high_hn, 10);
+      const rLow  = parseInt(row.r_low_hn,  10);
+      const rHigh = parseInt(row.r_high_hn, 10);
+      return (houseNum >= lLow && houseNum <= lHigh) ||
+             (houseNum >= rLow && houseNum <= rHigh);
+    });
+    if (match) bestRow = match;
+    console.log(`[getPlowData] houseNum=${houseNum} → segment physicalid=${bestRow.physicalid} (l:${bestRow.l_low_hn}-${bestRow.l_high_hn} r:${bestRow.r_low_hn}-${bestRow.r_high_hn})`);
+  }
+
+  const physicalid = bestRow.physicalid;
+  const st_label   = bestRow.stname_lab;
 
   // ── Step 2: PlowNYC physicalid → last plow timestamp ──────────────────────
   // Confirmed field name from dataset: 'snapshot' (not 'last_visited').
