@@ -3,7 +3,7 @@ import "./index.css";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 const ARCGIS_ENDPOINT =
-  "https://services.arcgis.com/vls6WvPaHNJ83Spx/ArcGIS/rest/services/Snow_Vehicle_Activity/FeatureServer/0/query";
+  "https://services.arcgis.com/vls6WvPaHNJ83Spx/arcgis/rest/services/Snow_Vehicle_Activity/FeatureServer/0/query";
 
 const NOMINATIM_ENDPOINT = "https://nominatim.openstreetmap.org/search";
 
