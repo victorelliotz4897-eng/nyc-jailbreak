@@ -54,7 +54,9 @@ async function getPlowData(address) {
     console.log("[getPlowData] PlowNYC fetch →", plowUrl);
     const plowRes = await fetch(plowUrl);
     if (!plowRes.ok) throw new Error(`PlowNYC error: HTTP ${plowRes.status}`);
-    plowData = await plowRes.json();
+    const text = await plowRes.text();
+    // Empty body = no plow record for this segment (valid — treat as unplowed)
+    plowData = text.trim() ? JSON.parse(text) : {};
     console.log("[getPlowData] PlowNYC →", plowData);
   } catch (err) {
     console.error("[getPlowData] PlowNYC failed:", err);
