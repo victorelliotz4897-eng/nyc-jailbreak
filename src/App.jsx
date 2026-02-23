@@ -12,8 +12,11 @@ const NOMINATIM_ENDPOINT = "https://nominatim.openstreetmap.org/search";
 const PARTYPLACE_CLEARED_URL = "https://www.partyplace.com/?ref=nyc-jailbreak-cleared";
 const PARTYPLACE_SNOWED_URL  = "https://www.partyplace.com/?ref=nyc-jailbreak-snowed";
 
-const TWO_HOURS_MS  = 2 * 60 * 60 * 1000;
-const SIX_HOURS_MS  = 6 * 60 * 60 * 1000;
+const TWO_HOURS_MS        = 2 * 60 * 60 * 1000;
+const SIX_HOURS_MS        = 6 * 60 * 60 * 1000;
+// ArcGIS stores timestamps in Eastern Time but labels them as UTC.
+// Add 4 hours to shift ET → UTC before comparing against Date.now().
+const ARCGIS_UTC_OFFSET_MS = 4 * 60 * 60 * 1000;
 
 // ─── Async helpers ───────────────────────────────────────────────────────────
 
@@ -66,7 +69,7 @@ const fetchPlowStatus = async (lat, lng) => {
     outFields:      'last_visited,street_name,status',
     inSR:           '4326',
     outSR:          '4326',
-    distance:       '100', // Look within 100 meters of the address
+    distance:       '150', // Look within 150 meters (covers geocoder pin-on-roof offset)
     units:          'esriSRUnit_Meter',
     returnGeometry: 'false'
   });
@@ -76,41 +79,77 @@ const fetchPlowStatus = async (lat, lng) => {
   return await response.json();
 };
 
-/** Geocodes the address then fetches plow status; returns raw ArcGIS attributes. */
+/** Fetches plow status and tags the result with _source for evaluateStatus. */
 async function querySnowActivity(lat, lon) {
   const data = await fetchPlowStatus(lat, lon);
   if (!data.features || !data.features.length) {
-    return { street_name: "your street", last_visited: null, status: "pending" };
+    // No ArcGIS features within radius → nothing nearby at all
+    return { _source: "no_features", street_name: "your street", last_visited: null, status: null };
   }
-  return data.features[0].attributes;
+  // Features found — block may still be pending within those features
+  return { ...data.features[0].attributes, _source: "features" };
 }
 
 // ─── Jailbreak evaluation ─────────────────────────────────────────────────────
 
 /**
  * Determine jailbreak status from raw ArcGIS attributes.
- * Returns { status: "cleared" | "borderline" | "snowed_in", lastVisited: Date|null, streetName: string }
+ *
+ * Status codes (from the official PlowNYC map):
+ *   1 / "Recently Serviced"     → cleared     ("FREEDOM. Plowed in the last hour.")
+ *   2 / "Serviced 1-6 hours ago"→ borderline  ("CLEAR. Plowed recently.")
+ *   3                           → crunchy     ("CRUNCHY. Plowed over 6 hours ago.")
+ *   0 / null                    → fall back to last_visited timestamp age
+ *   "Pending" (with features)   → neighborhood ("Put the kettle on.")
+ *   no features at all          → snowed_in
+ *
+ * Returns { status: "cleared"|"borderline"|"crunchy"|"neighborhood"|"snowed_in",
+ *           lastVisited: Date|null, streetName: string }
  */
 function evaluateStatus(attributes) {
   const streetName     = attributes.street_name || attributes.STREET_NAME || "your street";
-  const rawStatus      = (attributes.status || attributes.STATUS || "").toLowerCase();
+  const statusRaw      = attributes.status ?? attributes.STATUS;
+  const statusNum      = Number(statusRaw);                                  // NaN if string
+  const statusStr      = typeof statusRaw === "string" ? statusRaw.toLowerCase() : "";
   const lastVisitedRaw = attributes.last_visited ?? attributes.LAST_VISITED;
 
-  if (rawStatus === "pending") {
+  // Shift ArcGIS ET-stored-as-UTC timestamps to true UTC before age comparison
+  const parseTs = (raw) => (raw != null ? new Date(Number(raw) + ARCGIS_UTC_OFFSET_MS) : null);
+
+  // ── No features within radius → definitively nothing nearby ──────────────
+  if (attributes._source === "no_features") {
     return { status: "snowed_in", lastVisited: null, streetName };
   }
 
+  // ── Features found but block explicitly pending → plow is close ──────────
+  if (statusStr === "pending") {
+    return { status: "neighborhood", lastVisited: null, streetName };
+  }
+
+  // ── Status 1 / "Recently Serviced" → FREEDOM ─────────────────────────────
+  if (statusNum === 1 || statusStr.includes("recently serviced")) {
+    return { status: "cleared", lastVisited: parseTs(lastVisitedRaw), streetName };
+  }
+
+  // ── Status 2 / "Serviced 1-6 hours ago" → CLEAR ──────────────────────────
+  if (statusNum === 2 || statusStr.includes("serviced 1")) {
+    return { status: "borderline", lastVisited: parseTs(lastVisitedRaw), streetName };
+  }
+
+  // ── Status 3 → CRUNCHY ───────────────────────────────────────────────────
+  if (statusNum === 3) {
+    return { status: "crunchy", lastVisited: parseTs(lastVisitedRaw), streetName };
+  }
+
+  // ── Status 0 / null / unknown → fall back to timestamp age ───────────────
   if (!lastVisitedRaw) {
     return { status: "snowed_in", lastVisited: null, streetName };
   }
-
-  // Socrata returns ISO-8601 strings; new Date() handles both that and epoch ms numbers
-  const lastVisited = new Date(lastVisitedRaw);
+  const lastVisited = parseTs(lastVisitedRaw);
   const ageMs = Date.now() - lastVisited.getTime();
-
-  if (ageMs <= TWO_HOURS_MS)  return { status: "cleared",    lastVisited, streetName };
-  if (ageMs >= SIX_HOURS_MS)  return { status: "snowed_in",  lastVisited, streetName };
-  return                              { status: "borderline", lastVisited, streetName };
+  if (ageMs <= TWO_HOURS_MS) return { status: "cleared",    lastVisited, streetName };
+  if (ageMs <= SIX_HOURS_MS) return { status: "borderline", lastVisited, streetName };
+  return                            { status: "crunchy",     lastVisited, streetName };
 }
 
 function formatTime(date) {
@@ -205,21 +244,35 @@ function AddressForm({ onSubmit, loading }) {
 function AlertCard({ result }) {
   const { status, lastVisited, streetName } = result;
 
-  const isCleared    = status === "cleared";
-  const isBorderline = status === "borderline";
-  const isSnowedIn   = status === "snowed_in";
+  const isCleared      = status === "cleared";
+  const isBorderline   = status === "borderline";
+  const isCrunchy      = status === "crunchy";
+  const isNeighborhood = status === "neighborhood";
+  const isSnowedIn     = status === "snowed_in";
 
-  const borderClass  = isCleared ? "alert-green border-green-600"
-                     : isBorderline ? "border-yellow-500"
-                     : "alert-red border-red-700";
-  const headerBg     = isCleared ? "bg-green-700"
-                     : isBorderline ? "bg-yellow-500"
-                     : "bg-red-800";
-  const headerText   = isBorderline ? "text-black" : "text-white";
+  const borderClass = isCleared      ? "alert-green border-green-600"
+                    : isBorderline   ? "border-yellow-500"
+                    : isCrunchy      ? "border-orange-600"
+                    : isNeighborhood ? "border-blue-600"
+                    : "alert-red border-red-700";
+  const headerBg    = isCleared      ? "bg-green-700"
+                    : isBorderline   ? "bg-yellow-500"
+                    : isCrunchy      ? "bg-orange-700"
+                    : isNeighborhood ? "bg-blue-800"
+                    : "bg-red-800";
+  const headerText  = isBorderline ? "text-black" : "text-white";
 
-  const headline = isCleared    ? "⬛ STATUS: COAST IS CLEAR"
-                 : isBorderline ? "▲  STATUS: PROCEED WITH CAUTION"
+  const headline = isCleared      ? "⬛ STATUS: FREEDOM"
+                 : isBorderline   ? "▲  STATUS: CLEAR"
+                 : isCrunchy      ? "~ STATUS: CRUNCHY"
+                 : isNeighborhood ? "◐ STATUS: ALMOST..."
                  : "⬛ STATUS: STAY IN BED";
+
+  const badge = isCleared      ? { cls: "bg-green-500 text-white",    label: "● FREEDOM"   }
+              : isBorderline   ? { cls: "bg-yellow-300 text-black",   label: "✓ CLEAR"     }
+              : isCrunchy      ? { cls: "bg-orange-500 text-white",   label: "~ CRUNCHY"   }
+              : isNeighborhood ? { cls: "bg-blue-500 text-white",     label: "◐ NEARBY"    }
+              :                  { cls: "bg-red-600 text-white",      label: "✖ UNPLOWED"  };
 
   return (
     <div className={`w-full max-w-2xl mx-auto mt-8 px-4 border-2 bg-black font-mono ${borderClass}`}>
@@ -228,14 +281,8 @@ function AlertCard({ result }) {
           <span className="blink">▌</span>
           {headline}
         </span>
-        <span
-          className={`font-black text-xs tracking-widest uppercase px-3 py-1 ${
-            isCleared    ? "bg-green-500 text-white"
-            : isBorderline ? "bg-yellow-300 text-black"
-            : "bg-red-600 text-white"
-          }`}
-        >
-          {isCleared ? "● PLOWED" : isBorderline ? "⚠ BORDERLINE" : "✖ UNPLOWED"}
+        <span className={`font-black text-xs tracking-widest uppercase px-3 py-1 ${badge.cls}`}>
+          {badge.label}
         </span>
       </div>
 
@@ -248,12 +295,11 @@ function AlertCard({ result }) {
         {isCleared && (
           <div className="border-l-4 border-green-500 pl-4">
             <p className="text-green-400 text-2xl sm:text-3xl font-black leading-tight">
-              The coast is clear!
+              FREEDOM.
             </p>
             <p className="text-gray-300 mt-1 text-sm">
-              Your block was plowed at{" "}
-              <span className="text-green-400 font-black">{formatTime(lastVisited)}</span>.
-              {" "}Roads should be passable.
+              Plowed in the last hour.
+              {lastVisited && <> Last visited at <span className="text-green-400 font-black">{formatTime(lastVisited)}</span>.</>}
             </p>
           </div>
         )}
@@ -261,12 +307,34 @@ function AlertCard({ result }) {
         {isBorderline && (
           <div className="border-l-4 border-yellow-500 pl-4">
             <p className="text-yellow-400 text-2xl sm:text-3xl font-black leading-tight">
-              Proceed with caution.
+              CLEAR.
             </p>
             <p className="text-gray-300 mt-1 text-sm">
-              Last plowed at{" "}
-              <span className="text-yellow-400 font-black">{formatTime(lastVisited)}</span>.
-              {" "}That was a few hours ago — conditions may have deteriorated.
+              Plowed recently.
+              {lastVisited && <> Last visited at <span className="text-yellow-400 font-black">{formatTime(lastVisited)}</span>.</>}
+            </p>
+          </div>
+        )}
+
+        {isCrunchy && (
+          <div className="border-l-4 border-orange-500 pl-4">
+            <p className="text-orange-400 text-2xl sm:text-3xl font-black leading-tight">
+              CRUNCHY.
+            </p>
+            <p className="text-gray-300 mt-1 text-sm">
+              Plowed over 6 hours ago.
+              {lastVisited && <> Last visited at <span className="text-orange-400 font-black">{formatTime(lastVisited)}</span>.</>}
+            </p>
+          </div>
+        )}
+
+        {isNeighborhood && (
+          <div className="border-l-4 border-blue-500 pl-4">
+            <p className="text-blue-400 text-2xl sm:text-3xl font-black leading-tight">
+              PUT THE KETTLE ON.
+            </p>
+            <p className="text-gray-300 mt-1 text-sm">
+              The plow is in your neighborhood but hasn't hit your block.
             </p>
           </div>
         )}
