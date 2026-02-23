@@ -17,12 +17,23 @@ const SIX_HOURS_MS   = 6 * 60 * 60 * 1000;
 
 // ─── Async helpers ───────────────────────────────────────────────────────────
 
+// NYC CSCL stname_lab uses abbreviated forms — "E 9 ST", "W 57 ST", "5 AV".
+// These mappings convert the long forms that users type to those abbreviations.
+const STREET_ABBREVS = {
+  EAST: "E", WEST: "W", NORTH: "N", SOUTH: "S",
+  STREET: "ST", AVENUE: "AV", BOULEVARD: "BLVD",
+  DRIVE: "DR", PLACE: "PL", ROAD: "RD", LANE: "LN",
+  COURT: "CT", TERRACE: "TER", HIGHWAY: "HWY", PARKWAY: "PKY",
+};
+
 /**
- * Normalise free-text street input into the uppercase form NYC CSCL uses.
+ * Normalise free-text street input into the abbreviated uppercase form
+ * that stname_lab in NYC CSCL actually stores.
  *
- *   "30 East 9th Street"  →  "EAST 9 STREET"
- *   "west 57th st"        →  "WEST 57 ST"
+ *   "30 East 9th Street"  →  "E 9 ST"
+ *   "west 57th street"    →  "W 57 ST"
  *   "Broadway"            →  "BROADWAY"
+ *   "5th Avenue"          →  "5 AV"
  */
 function normalizeStreetName(input) {
   return input
@@ -30,7 +41,11 @@ function normalizeStreetName(input) {
     .replace(/^\d+\s+/, "")                      // strip house number
     .replace(/\b(\d+)(?:st|nd|rd|th)\b/gi, "$1") // "9th" → "9"
     .trim()
-    .toUpperCase();
+    .toUpperCase()
+    .replace(
+      /\b(EAST|WEST|NORTH|SOUTH|STREET|AVENUE|BOULEVARD|DRIVE|PLACE|ROAD|LANE|COURT|TERRACE|HIGHWAY|PARKWAY)\b/g,
+      word => STREET_ABBREVS[word],
+    );
 }
 
 async function getPlowData(streetName) {
