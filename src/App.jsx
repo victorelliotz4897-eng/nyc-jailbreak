@@ -18,110 +18,96 @@ const SIX_HOURS_MS   = 6 * 60 * 60 * 1000;
 // ─── Async helpers ───────────────────────────────────────────────────────────
 
 /**
- * Step 1 — Street name → physicalid via the NYC Street Centerline (CSCL).
- * Searches both the abbreviated label (st_label, e.g. "E 9 ST") and the
- * full name (full_stree, e.g. "EAST 9 STREET") with a substring match.
- * Returns up to 5 candidates; picks the first one.
+ * getPlowData(streetName)
+ *
+ * Two-step Socrata lookup:
+ *   1. CSCL (dpb9-ubdh)  — case-insensitive st_label match → physicalid
+ *   2. PlowNYC (rmhc-afj9) — physicalid → last_visited timestamp
+ *
+ * Returns:
+ *   { physicalid, streetName, lastVisited: Date|null, isPlowed: boolean }
+ *   isPlowed = true when last_visited is within the last 180 minutes.
+ *
+ * State variables consumed by this function and the component:
+ *   loading  — set true while this runs, false on completion or error
+ *   result   — stores the evaluateStatus() output derived from the return value
+ *   error    — stores the thrown error message on failure
  */
-async function findStreetByName(input) {
-  // Strip a leading house number so "30 East 9 St" searches "East 9 St"
-  const streetOnly = input.replace(/^\d+\s+/, "").trim();
-
-  const params = new URLSearchParams({
-    "$where":  `st_label like '%${streetOnly}%' OR full_stree like '%${streetOnly}%'`,
-    "$select": "physicalid,st_label,full_stree",
-    "$limit":  "5",
+async function getPlowData(streetName) {
+  // ── Step 1: CSCL street-name → physicalid ────────────────────────────────
+  // upper() makes the LIKE match case-insensitive on the Socrata side.
+  const csclParams = new URLSearchParams({
+    "$select": "physicalid,st_label",
+    "$where":  `upper(st_label) like upper('%${streetName}%')`,
+    "$limit":  "1",
   });
+  const csclUrl = `${CSCL_ENDPOINT}?${csclParams}`;
 
-  const res = await fetch(`${CSCL_ENDPOINT}?${params}`);
-  if (!res.ok) throw new Error(`Street lookup failed: HTTP ${res.status}`);
-
-  const rows = await res.json();
-  console.table(rows); // debug: inspect raw CSCL candidates
-
-  if (!rows.length) {
-    throw new Error(
-      `No street found for "${streetOnly}". ` +
-      `Try an abbreviated name like "E 9 St" or "Broadway".`
-    );
+  let csclRows;
+  try {
+    console.log("[getPlowData] CSCL fetch →", csclUrl);
+    const csclRes = await fetch(csclUrl);
+    if (!csclRes.ok) throw new Error(`CSCL error: HTTP ${csclRes.status}`);
+    csclRows = await csclRes.json();
+    console.table(csclRows);
+  } catch (err) {
+    console.error("[getPlowData] CSCL fetch failed. URL was:", csclUrl, err);
+    throw err;
   }
 
-  // If multiple boroughs returned, surface a hint but still proceed with first
-  if (rows.length > 1) {
-    console.info(
-      `${rows.length} street segments matched — using first result. ` +
-      `Add a borough (e.g. "East 9 St, Manhattan") to narrow it down.`
-    );
-  }
+  if (!csclRows.length) throw new Error("Street name not recognized.");
 
-  const row = rows[0];
-  return {
-    physicalid: row.physicalid,
-    streetName: row.st_label || row.full_stree || streetOnly,
-  };
-}
+  const { physicalid, st_label } = csclRows[0];
 
-/**
- * Step 2 — physicalid → last plow timestamp via the DSNY PlowNYC dataset.
- * Returns the raw Socrata row merged with a _source tag for evaluateStatus.
- */
-async function queryPlowNYC(physicalid, streetName) {
-  const params = new URLSearchParams({
+  // ── Step 2: PlowNYC physicalid → last_visited ─────────────────────────────
+  const plowParams = new URLSearchParams({
     "physical_id": physicalid,
     "$order":      "last_visited DESC",
     "$limit":      "1",
   });
+  const plowUrl = `${PLOWNYC_ENDPOINT}?${plowParams}`;
 
-  const res = await fetch(`${PLOWNYC_ENDPOINT}?${params}`);
-  if (!res.ok) throw new Error(`PlowNYC lookup failed: HTTP ${res.status}`);
-
-  const rows = await res.json();
-  console.table(rows); // debug: inspect raw PlowNYC record
-
-  if (!rows.length) {
-    return { street_name: streetName, last_visited: null, _source: "no_record" };
+  let plowRows;
+  try {
+    console.log("[getPlowData] PlowNYC fetch →", plowUrl);
+    const plowRes = await fetch(plowUrl);
+    if (!plowRes.ok) throw new Error(`PlowNYC error: HTTP ${plowRes.status}`);
+    plowRows = await plowRes.json();
+    console.table(plowRows);
+  } catch (err) {
+    console.error("[getPlowData] PlowNYC fetch failed. URL was:", plowUrl, err);
+    throw err;
   }
 
-  return { ...rows[0], street_name: streetName, _source: "record" };
-}
+  const lastVisitedRaw = plowRows[0]?.last_visited ?? null;
+  const lastVisited    = lastVisitedRaw ? new Date(lastVisitedRaw) : null;
+  const isPlowed       = lastVisited
+    ? (Date.now() - lastVisited.getTime()) <= 180 * 60 * 1000
+    : false;
 
-/** Orchestrates the two-step CSCL → PlowNYC lookup. */
-async function querySnowActivity(input) {
-  const { physicalid, streetName } = await findStreetByName(input);
-  return queryPlowNYC(physicalid, streetName);
+  return { physicalid, streetName: st_label || streetName, lastVisited, isPlowed };
 }
 
 // ─── Jailbreak evaluation ─────────────────────────────────────────────────────
 
 /**
- * Determine jailbreak status from a raw Socrata PlowNYC row.
+ * Map getPlowData() output → UI status string.
  *
- * Socrata returns last_visited as an ISO-8601 string (already in UTC).
- * Thresholds (per spec):
- *   YES  — plowed within the last 3 h  → "cleared"
- *   BORDERLINE — 3–6 h ago             → "borderline"
- *   CRUNCHY    — > 6 h ago             → "crunchy"
- *   no record found                    → "snowed_in"
+ *   isPlowed true  (≤180 min) → "cleared"
+ *   3–6 h ago                → "borderline"
+ *   > 6 h ago                → "crunchy"
+ *   no record                → "snowed_in"
  *
- * Returns { status: "cleared"|"borderline"|"crunchy"|"snowed_in",
- *           lastVisited: Date|null, streetName: string }
+ * Returns { status, lastVisited: Date|null, streetName }
  */
-function evaluateStatus(attributes) {
-  const streetName     = attributes.street_name || "your street";
-  const lastVisitedRaw = attributes.last_visited;
+function evaluateStatus({ streetName, lastVisited, isPlowed }) {
+  if (!lastVisited) return { status: "snowed_in", lastVisited: null, streetName };
 
-  // No PlowNYC record for this segment this storm
-  if (attributes._source === "no_record" || !lastVisitedRaw) {
-    return { status: "snowed_in", lastVisited: null, streetName };
-  }
+  if (isPlowed) return { status: "cleared", lastVisited, streetName };
 
-  // Socrata timestamps are ISO-8601 UTC strings — new Date() parses them correctly
-  const lastVisited = new Date(lastVisitedRaw);
   const ageMs = Date.now() - lastVisited.getTime();
-
-  if (ageMs <= THREE_HOURS_MS) return { status: "cleared",    lastVisited, streetName };
-  if (ageMs <= SIX_HOURS_MS)   return { status: "borderline", lastVisited, streetName };
-  return                               { status: "crunchy",    lastVisited, streetName };
+  if (ageMs <= SIX_HOURS_MS) return { status: "borderline", lastVisited, streetName };
+  return                            { status: "crunchy",    lastVisited, streetName };
 }
 
 function formatTime(date) {
@@ -463,8 +449,8 @@ export default function App() {
     setError(null);
 
     try {
-      const attributes = await querySnowActivity(address);
-      const evaluation = evaluateStatus(attributes);
+      const plowData   = await getPlowData(address);
+      const evaluation = evaluateStatus(plowData);
       setResult(evaluation);
     } catch (err) {
       setError(err.message || "An unexpected error occurred.");
