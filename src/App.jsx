@@ -49,18 +49,22 @@ async function geocodeAddress(address) {
  * Query the NYC Snow Vehicle Activity ArcGIS layer for the nearest street
  * segment to the given lat/lon point.
  *
- * We use a bounding envelope around the point as the spatial filter.
- * ArcGIS geographic SR 4326 is used throughout.
+ * Uses esriGeometryPoint + distance buffer as specified, with 4326 spatial reference.
+ * Widens the search radius if no results are returned.
  */
 async function querySnowActivity(lat, lon) {
-  const fetchWithEnvelope = async (delta) => {
-    const envelope = `${lon - delta},${lat - delta},${lon + delta},${lat + delta}`;
+  const fetchWithDistance = async (distanceMeters) => {
+    // Pass geometry as a JSON point object — most reliable format for ArcGIS
+    const pointGeometry = JSON.stringify({ x: lon, y: lat, spatialReference: { wkid: 4326 } });
+
     const params = new URLSearchParams({
       where:             "1=1",
-      geometry:          envelope,
-      geometryType:      "esriGeometryEnvelope",
+      geometry:          pointGeometry,
+      geometryType:      "esriGeometryPoint",
       inSR:              "4326",
       spatialRel:        "esriSpatialRelIntersects",
+      distance:          String(distanceMeters),
+      units:             "esriSRUnit_Meter",
       outFields:         "last_visited,street_name,status",
       resultRecordCount: "5",
       f:                 "json",
@@ -68,20 +72,27 @@ async function querySnowActivity(lat, lon) {
 
     const res = await fetch(`${ARCGIS_ENDPOINT}?${params}`);
     if (!res.ok) throw new Error(`ArcGIS request failed: HTTP ${res.status}`);
-    const data = await res.json();
+
+    let data;
+    try {
+      data = await res.json();
+    } catch {
+      throw new Error("ArcGIS returned an unexpected response. The service may be temporarily unavailable.");
+    }
+
     if (data.error) {
       throw new Error(`ArcGIS error: ${data.error.message || JSON.stringify(data.error)}`);
     }
     return data;
   };
 
-  // Try ~500 m envelope first, widen to ~1 km if empty
-  let data = await fetchWithEnvelope(0.005);
+  // Try 500 m first, widen to 1 km if no features found
+  let data = await fetchWithDistance(500);
   if (!data.features || data.features.length === 0) {
-    data = await fetchWithEnvelope(0.01);
+    data = await fetchWithDistance(1000);
   }
   if (!data.features || data.features.length === 0) {
-    throw new Error("No snow plow data found near this address.");
+    throw new Error("No snow plow data found near this address. This service only covers NYC streets.");
   }
 
   return data.features[0].attributes;
