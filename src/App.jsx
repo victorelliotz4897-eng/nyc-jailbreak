@@ -4,7 +4,12 @@ import "./index.css";
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 // NYC Street Centerline (CSCL) — spatial lookup: address lat/lon → physicalid + street name
-const CSCL_ENDPOINT = "https://data.cityofnewyork.us/resource/exjm-f27b.json";
+// dpb9-ubdh = CSCL_PlowNYC (purpose-built for PlowNYC); 3mf9-qshr = current general CSCL
+// exjm-f27b was the original but is now deprecated (returns 404)
+const CSCL_ENDPOINTS = [
+  "https://data.cityofnewyork.us/resource/dpb9-ubdh.json",
+  "https://data.cityofnewyork.us/resource/3mf9-qshr.json",
+];
 
 // DSNY PlowNYC — plow activity: physicalid → last visit timestamp
 const PLOWNYC_ENDPOINT = "https://data.cityofnewyork.us/resource/rmhc-afj9.json";
@@ -50,31 +55,42 @@ async function geocodeAddress(address) {
 }
 
 /**
- * Step 1 of 2: find the nearest NYC street segment for a lat/lon via the
- * NYC Street Centerline (CSCL) Socrata dataset.
+ * Step 1 of 2: find the nearest NYC street segment for a lat/lon.
+ * Tries each CSCL endpoint in order (the old one is deprecated/404).
  * Returns { physicalid, streetName }.
  */
 async function findStreetSegment(lat, lon) {
-  const query = async (radiusMeters) => {
+  const queryEndpoint = async (endpoint, radiusMeters) => {
     const params = new URLSearchParams({
       "$where":  `within_circle(the_geom,${lat},${lon},${radiusMeters})`,
       "$limit":  "1",
-      "$select": "physicalid,st_label,full_stree",
+      // Request all likely street-name variants; Socrata silently skips unknown columns
+      "$select": "physicalid,st_label,full_stree,stname_label,streetname",
     });
-    const res = await fetch(`${CSCL_ENDPOINT}?${params}`);
+    const res = await fetch(`${endpoint}?${params}`);
+    // 404 means deprecated/gone — signal caller to try next endpoint
+    if (res.status === 404) return null;
     if (!res.ok) throw new Error(`Street lookup failed: HTTP ${res.status}`);
     return res.json();
   };
 
-  let rows = await query(200);
-  if (!rows.length) rows = await query(600);
-  if (!rows.length) throw new Error("No NYC street found near this address. Make sure to include your borough.");
+  for (const endpoint of CSCL_ENDPOINTS) {
+    let rows = await queryEndpoint(endpoint, 200);
+    if (rows === null) continue;              // 404 → try next endpoint
+    if (!rows.length) {
+      rows = await queryEndpoint(endpoint, 600);
+      if (rows === null) continue;
+    }
+    if (rows.length) {
+      const row = rows[0];
+      return {
+        physicalid: row.physicalid,
+        streetName: row.st_label || row.stname_label || row.full_stree || row.streetname || "your street",
+      };
+    }
+  }
 
-  const row = rows[0];
-  return {
-    physicalid: row.physicalid,
-    streetName: row.st_label || row.full_stree || "your street",
-  };
+  throw new Error("No NYC street found near this address. Make sure to include your borough (e.g., Brooklyn, Manhattan).");
 }
 
 /**
@@ -97,8 +113,9 @@ async function queryPlowNYC(physicalid, streetName) {
   }
 
   const r = rows[0];
-  // Socrata stores the date as an ISO-8601 string; field may be named "date" or "last_modified"
-  const last_visited = r.date || r.last_modified || r.lastmodifieddate || null;
+  // Try every plausible timestamp field name across dataset versions
+  const last_visited = r.date || r.last_modified || r.lastmodifieddate
+                    || r.last_plow || r.datetime || r.modified || null;
 
   return { street_name: streetName, last_visited, status: "active" };
 }
