@@ -18,6 +18,29 @@ const SIX_HOURS_MS   = 6 * 60 * 60 * 1000;
 // ─── Async helpers ───────────────────────────────────────────────────────────
 
 /**
+ * Build a Socrata SODA URL without mangling the $ prefix on SoQL parameters.
+ *
+ * URLSearchParams encodes $ → %24, which Socrata's parser does NOT recognise
+ * as a SoQL keyword — causing HTTP 400. We write the $ ourselves and only
+ * run encodeURIComponent on the VALUES.
+ *
+ *   soqlParams  — keys are SoQL clauses WITHOUT the leading $
+ *                 e.g. { select: "...", where: "...", limit: "1" }
+ *   filterParams — plain key=value pairs, no $
+ *                 e.g. { physical_id: "12345" }
+ */
+function buildSocrataUrl(base, { soqlParams = {}, filterParams = {} } = {}) {
+  const parts = [];
+  for (const [k, v] of Object.entries(soqlParams)) {
+    parts.push(`$${k}=${encodeURIComponent(v)}`);
+  }
+  for (const [k, v] of Object.entries(filterParams)) {
+    parts.push(`${encodeURIComponent(k)}=${encodeURIComponent(v)}`);
+  }
+  return parts.length ? `${base}?${parts.join("&")}` : base;
+}
+
+/**
  * getPlowData(streetName)
  *
  * Two-step Socrata lookup:
@@ -36,12 +59,15 @@ const SIX_HOURS_MS   = 6 * 60 * 60 * 1000;
 async function getPlowData(streetName) {
   // ── Step 1: CSCL street-name → physicalid ────────────────────────────────
   // upper() makes the LIKE match case-insensitive on the Socrata side.
-  const csclParams = new URLSearchParams({
-    "$select": "physicalid,st_label",
-    "$where":  `upper(st_label) like upper('%${streetName}%')`,
-    "$limit":  "1",
+  // The % wildcards survive encodeURIComponent as %25, which the server
+  // URL-decodes back to % before the SoQL parser sees them.
+  const csclUrl = buildSocrataUrl(CSCL_ENDPOINT, {
+    soqlParams: {
+      select: "physicalid,st_label",
+      where:  `upper(st_label) like upper('%${streetName}%')`,
+      limit:  "1",
+    },
   });
-  const csclUrl = `${CSCL_ENDPOINT}?${csclParams}`;
 
   let csclRows;
   try {
@@ -59,13 +85,11 @@ async function getPlowData(streetName) {
 
   const { physicalid, st_label } = csclRows[0];
 
-  // ── Step 2: PlowNYC physicalid → last_visited ─────────────────────────────
-  const plowParams = new URLSearchParams({
-    "physical_id": physicalid,
-    "$order":      "last_visited DESC",
-    "$limit":      "1",
+  // ── Step 2: PlowNYC physicalid → last plow timestamp ──────────────────────
+  const plowUrl = buildSocrataUrl(PLOWNYC_ENDPOINT, {
+    filterParams: { physical_id: physicalid },
+    soqlParams:   { order: "last_visited DESC", limit: "1" },
   });
-  const plowUrl = `${PLOWNYC_ENDPOINT}?${plowParams}`;
 
   let plowRows;
   try {
@@ -79,9 +103,13 @@ async function getPlowData(streetName) {
     throw err;
   }
 
-  const lastVisitedRaw = plowRows[0]?.last_visited ?? null;
-  const lastVisited    = lastVisitedRaw ? new Date(lastVisitedRaw) : null;
-  const isPlowed       = lastVisited
+  // Field is 'last_visited' in the SODA API; fall back to 'last_plow_timestamp'
+  // in case NYC Open Data ever renames the column.
+  const lastVisitedRaw = plowRows[0]?.last_visited
+    ?? plowRows[0]?.last_plow_timestamp
+    ?? null;
+  const lastVisited = lastVisitedRaw ? new Date(lastVisitedRaw) : null;
+  const isPlowed    = lastVisited
     ? (Date.now() - lastVisited.getTime()) <= 180 * 60 * 1000
     : false;
 
