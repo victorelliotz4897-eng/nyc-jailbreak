@@ -18,47 +18,7 @@ const SIX_HOURS_MS   = 6 * 60 * 60 * 1000;
 // ─── Async helpers ───────────────────────────────────────────────────────────
 
 /**
- * Build a Socrata SODA URL without mangling the $ prefix on SoQL parameters.
- *
- * URLSearchParams encodes $ → %24, which Socrata's parser does NOT recognise
- * as a SoQL keyword — causing HTTP 400. We write the $ ourselves and only
- * run encodeURIComponent on the VALUES.
- *
- *   soqlParams  — keys are SoQL clauses WITHOUT the leading $
- *                 e.g. { select: "...", where: "...", limit: "1" }
- *   filterParams — plain key=value pairs, no $
- *                 e.g. { physical_id: "12345" }
- */
-function buildSocrataUrl(base, { soqlParams = {}, filterParams = {} } = {}) {
-  const parts = [];
-  for (const [k, v] of Object.entries(soqlParams)) {
-    parts.push(`$${k}=${encodeURIComponent(v)}`);
-  }
-  for (const [k, v] of Object.entries(filterParams)) {
-    parts.push(`${encodeURIComponent(k)}=${encodeURIComponent(v)}`);
-  }
-  return parts.length ? `${base}?${parts.join("&")}` : base;
-}
-
-/**
- * getPlowData(streetName)
- *
- * Two-step Socrata lookup:
- *   1. CSCL (dpb9-ubdh)  — case-insensitive st_label match → physicalid
- *   2. PlowNYC (rmhc-afj9) — physicalid → last_visited timestamp
- *
- * Returns:
- *   { physicalid, streetName, lastVisited: Date|null, isPlowed: boolean }
- *   isPlowed = true when last_visited is within the last 180 minutes.
- *
- * State variables consumed by this function and the component:
- *   loading  — set true while this runs, false on completion or error
- *   result   — stores the evaluateStatus() output derived from the return value
- *   error    — stores the thrown error message on failure
- */
-/**
- * Normalise free-text street input into the uppercase form that NYC CSCL
- * stores in st_label / full_stree.
+ * Normalise free-text street input into the uppercase form NYC CSCL uses.
  *
  *   "30 East 9th Street"  →  "EAST 9 STREET"
  *   "west 57th st"        →  "WEST 57 ST"
@@ -67,33 +27,33 @@ function buildSocrataUrl(base, { soqlParams = {}, filterParams = {} } = {}) {
 function normalizeStreetName(input) {
   return input
     .trim()
-    .replace(/^\d+\s+/, "")                      // strip house number: "30 East…" → "East…"
-    .replace(/\b(\d+)(?:st|nd|rd|th)\b/gi, "$1") // ordinals: "9th" → "9", "1st" → "1"
+    .replace(/^\d+\s+/, "")                      // strip house number
+    .replace(/\b(\d+)(?:st|nd|rd|th)\b/gi, "$1") // "9th" → "9"
     .trim()
     .toUpperCase();
 }
 
 async function getPlowData(streetName) {
   // ── Step 1: CSCL street-name → physicalid ────────────────────────────────
-  // NYC CSCL stores names in uppercase ("E 9 ST", "EAST 9 STREET").
-  // We normalise in JS and use a plain LIKE — the upper() SoQL function
-  // call is not supported by this dataset view and causes HTTP 400.
+  // IMPORTANT: only encodeURIComponent the user-supplied value.
+  // SoQL syntax characters (commas in $select, spaces in $order, etc.)
+  // must NOT be encoded — encodeURIComponent(",") = "%2C" breaks $select.
   const normalized = normalizeStreetName(streetName);
-  // $q is Socrata full-text search — no $where, no LIKE, no % wildcards,
-  // no single quotes.  Eliminates every encoding edge-case that caused 400.
-  const csclUrl = buildSocrataUrl(CSCL_ENDPOINT, {
-    soqlParams: {
-      q:      normalized,
-      select: "physicalid,st_label",
-      limit:  "1",
-    },
-  });
+  const csclUrl =
+    `${CSCL_ENDPOINT}` +
+    `?$q=${encodeURIComponent(normalized)}` +
+    `&$select=physicalid,st_label` +
+    `&$limit=1`;
 
   let csclRows;
   try {
     console.log("[getPlowData] CSCL fetch →", csclUrl);
     const csclRes = await fetch(csclUrl);
-    if (!csclRes.ok) throw new Error(`CSCL error: HTTP ${csclRes.status}`);
+    if (!csclRes.ok) {
+      const body = await csclRes.text();
+      console.error("[getPlowData] CSCL error body:", body);
+      throw new Error(`CSCL error: HTTP ${csclRes.status}`);
+    }
     csclRows = await csclRes.json();
     console.table(csclRows);
   } catch (err) {
@@ -106,16 +66,21 @@ async function getPlowData(streetName) {
   const { physicalid, st_label } = csclRows[0];
 
   // ── Step 2: PlowNYC physicalid → last plow timestamp ──────────────────────
-  const plowUrl = buildSocrataUrl(PLOWNYC_ENDPOINT, {
-    filterParams: { physical_id: physicalid },
-    soqlParams:   { order: "last_visited DESC", limit: "1" },
-  });
+  const plowUrl =
+    `${PLOWNYC_ENDPOINT}` +
+    `?physical_id=${encodeURIComponent(physicalid)}` +
+    `&$order=last_visited DESC` +
+    `&$limit=1`;
 
   let plowRows;
   try {
     console.log("[getPlowData] PlowNYC fetch →", plowUrl);
     const plowRes = await fetch(plowUrl);
-    if (!plowRes.ok) throw new Error(`PlowNYC error: HTTP ${plowRes.status}`);
+    if (!plowRes.ok) {
+      const body = await plowRes.text();
+      console.error("[getPlowData] PlowNYC error body:", body);
+      throw new Error(`PlowNYC error: HTTP ${plowRes.status}`);
+    }
     plowRows = await plowRes.json();
     console.table(plowRows);
   } catch (err) {
