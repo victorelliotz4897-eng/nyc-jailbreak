@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import "./index.css";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -129,11 +129,73 @@ function Header() {
   );
 }
 
+const GEOSEARCH_AUTOCOMPLETE = "https://geosearch.planninglabs.nyc/v2/autocomplete";
+
 function AddressForm({ onSubmit, loading }) {
-  const [address, setAddress] = useState("");
+  const [address,     setAddress]     = useState("");
+  const [suggestions, setSuggestions] = useState([]);
+  const [showList,    setShowList]    = useState(false);
+  const [activeIdx,   setActiveIdx]   = useState(-1);
+  const debounceRef = useRef(null);
+  const wrapperRef  = useRef(null);
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    function handleClick(e) {
+      if (wrapperRef.current && !wrapperRef.current.contains(e.target)) {
+        setShowList(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, []);
+
+  function handleChange(e) {
+    const val = e.target.value;
+    setAddress(val);
+    setActiveIdx(-1);
+
+    clearTimeout(debounceRef.current);
+    if (val.trim().length < 3) { setSuggestions([]); setShowList(false); return; }
+
+    debounceRef.current = setTimeout(async () => {
+      try {
+        const url = `${GEOSEARCH_AUTOCOMPLETE}?text=${encodeURIComponent(val)}&size=5`;
+        const res  = await fetch(url);
+        if (!res.ok) return;
+        const data = await res.json();
+        const labels = (data.features ?? []).map(f => f.properties.label);
+        setSuggestions(labels);
+        setShowList(labels.length > 0);
+      } catch { /* silently ignore autocomplete errors */ }
+    }, 200);
+  }
+
+  function selectSuggestion(label) {
+    setAddress(label);
+    setSuggestions([]);
+    setShowList(false);
+  }
+
+  function handleKeyDown(e) {
+    if (!showList || suggestions.length === 0) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setActiveIdx(i => Math.min(i + 1, suggestions.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActiveIdx(i => Math.max(i - 1, -1));
+    } else if (e.key === "Enter" && activeIdx >= 0) {
+      e.preventDefault();
+      selectSuggestion(suggestions[activeIdx]);
+    } else if (e.key === "Escape") {
+      setShowList(false);
+    }
+  }
 
   function handleSubmit(e) {
     e.preventDefault();
+    setShowList(false);
     if (address.trim()) onSubmit(address.trim());
   }
 
@@ -146,18 +208,38 @@ function AddressForm({ onSubmit, loading }) {
         Enter your NYC address
       </label>
 
-      <div className="flex flex-col sm:flex-row gap-2">
-        <input
-          id="address"
-          type="text"
-          value={address}
-          onChange={(e) => setAddress(e.target.value)}
-          placeholder="e.g. 123 Main St, Brooklyn"
-          disabled={loading}
-          className="flex-1 bg-black border-2 border-gray-700 focus:border-yellow-400 outline-none
-                     text-white font-mono text-sm px-4 py-3 placeholder-gray-700
-                     transition-colors duration-200 disabled:opacity-50"
-        />
+      <div className="flex flex-col sm:flex-row gap-2" ref={wrapperRef}>
+        <div className="relative flex-1">
+          <input
+            id="address"
+            type="text"
+            value={address}
+            onChange={handleChange}
+            onKeyDown={handleKeyDown}
+            onFocus={() => suggestions.length > 0 && setShowList(true)}
+            placeholder="e.g. 123 Main St, Brooklyn"
+            disabled={loading}
+            autoComplete="off"
+            className="w-full bg-black border-2 border-gray-700 focus:border-yellow-400 outline-none
+                       text-white font-mono text-sm px-4 py-3 placeholder-gray-700
+                       transition-colors duration-200 disabled:opacity-50"
+          />
+          {showList && (
+            <ul className="absolute z-50 w-full bg-black border-2 border-yellow-400 border-t-0
+                           font-mono text-sm text-white max-h-60 overflow-y-auto">
+              {suggestions.map((label, i) => (
+                <li
+                  key={i}
+                  onMouseDown={() => selectSuggestion(label)}
+                  className={`px-4 py-2 cursor-pointer truncate
+                    ${i === activeIdx ? "bg-yellow-400 text-black" : "hover:bg-gray-900"}`}
+                >
+                  {label}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
         <button
           type="submit"
           disabled={loading || !address.trim()}
@@ -177,7 +259,7 @@ function AddressForm({ onSubmit, loading }) {
       </div>
 
       <p className="mt-2 text-gray-700 font-mono text-xs">
-        Tip: Include your borough for best results — Brooklyn, Queens, Bronx, Manhattan, Staten Island
+        Tip: Select a suggestion or include your borough — Brooklyn, Queens, Bronx, Manhattan, Staten Island
       </p>
     </form>
   );
