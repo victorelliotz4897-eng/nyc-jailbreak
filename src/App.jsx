@@ -3,10 +3,10 @@ import "./index.css";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-// NYC Street Centerline (CSCL) — street name → physicalid
-const CSCL_ENDPOINT    = "https://data.cityofnewyork.us/resource/dpb9-ubdh.json";
-// DSNY PlowNYC — physicalid → last plow timestamp
-const PLOWNYC_ENDPOINT = "https://data.cityofnewyork.us/resource/rmhc-afj9.json";
+// OpenStreetMap Nominatim — address → lat/lon
+const NOMINATIM_ENDPOINT = "https://nominatim.openstreetmap.org/search";
+// PlowNYC real-time API — lat/lon → last plow timestamp
+const PLOWNYC_REALTIME   = "https://plownyc.cityofnewyork.us/mappingapi/api/highlight/info";
 
 const PARTYPLACE_CLEARED_URL = "https://www.partyplace.com/?ref=nyc-jailbreak-cleared";
 const PARTYPLACE_SNOWED_URL  = "https://www.partyplace.com/?ref=nyc-jailbreak-snowed";
@@ -17,123 +17,57 @@ const SIX_HOURS_MS   = 6 * 60 * 60 * 1000;
 
 // ─── Async helpers ───────────────────────────────────────────────────────────
 
-// NYC CSCL stname_lab uses abbreviated forms — "E 9 ST", "W 57 ST", "5 AV".
-// These mappings convert the long forms that users type to those abbreviations.
-const STREET_ABBREVS = {
-  EAST: "E", WEST: "W", NORTH: "N", SOUTH: "S",
-  STREET: "ST", AVENUE: "AV", BOULEVARD: "BLVD",
-  DRIVE: "DR", PLACE: "PL", ROAD: "RD", LANE: "LN",
-  COURT: "CT", TERRACE: "TER", HIGHWAY: "HWY", PARKWAY: "PKY",
-};
+async function getPlowData(address) {
+  // ── Step 1: Geocode address → lat/lon via Nominatim ──────────────────────
+  // Constrain to NYC bounding box so partial addresses resolve correctly.
+  const geocodeUrl =
+    `${NOMINATIM_ENDPOINT}` +
+    `?q=${encodeURIComponent(address + ", New York City, NY")}` +
+    `&format=json&limit=1&countrycodes=us` +
+    `&viewbox=-74.2591,40.9176,-73.7004,40.4774&bounded=1`;
 
-/**
- * Normalise free-text street input into the abbreviated uppercase form
- * that stname_lab in NYC CSCL actually stores.
- *
- *   "30 East 9th Street"  →  "E 9 ST"
- *   "west 57th street"    →  "W 57 ST"
- *   "Broadway"            →  "BROADWAY"
- *   "5th Avenue"          →  "5 AV"
- */
-function normalizeStreetName(input) {
-  return input
-    .trim()
-    .replace(/^\d+\s+/, "")                      // strip house number
-    .replace(/\b(\d+)(?:st|nd|rd|th)\b/gi, "$1") // "9th" → "9"
-    .trim()
-    .toUpperCase()
-    .replace(
-      /\b(EAST|WEST|NORTH|SOUTH|STREET|AVENUE|BOULEVARD|DRIVE|PLACE|ROAD|LANE|COURT|TERRACE|HIGHWAY|PARKWAY)\b/g,
-      word => STREET_ABBREVS[word],
-    );
-}
-
-async function getPlowData(streetName) {
-  // ── Step 1: CSCL street-name → physicalid ────────────────────────────────
-  // Parse house number BEFORE normalization so we can pick the right block.
-  const houseNum = parseInt(streetName.trim().match(/^(\d+)/)?.[1] ?? "0", 10);
-  const normalized = normalizeStreetName(streetName);
-
-  // Use exact $where match (NOT $q) so we get ALL segments of this street.
-  // Also fetch l_low_hn/l_high_hn/r_low_hn/r_high_hn for house-number filtering.
-  // encodeURIComponent on the value encodes spaces as %20; Socrata decodes them
-  // before parsing SoQL, so the server sees: stname_lab='E 9 ST'  ✓
-  const csclUrl =
-    `${CSCL_ENDPOINT}` +
-    `?$where=stname_lab='${encodeURIComponent(normalized)}'` +
-    `&$select=physicalid,stname_lab,l_low_hn,l_high_hn,r_low_hn,r_high_hn` +
-    `&$limit=100`;
-
-  let csclRows;
+  let lat, lon;
   try {
-    console.log("[getPlowData] CSCL fetch →", csclUrl);
-    const csclRes = await fetch(csclUrl);
-    if (!csclRes.ok) {
-      const body = await csclRes.text();
-      console.error("[getPlowData] CSCL error body:", body);
-      throw new Error(`CSCL error: HTTP ${csclRes.status}`);
-    }
-    csclRows = await csclRes.json();
-    console.table(csclRows);
+    console.log("[getPlowData] Nominatim fetch →", geocodeUrl);
+    const geoRes = await fetch(geocodeUrl, {
+      headers: { "User-Agent": "nyc-jailbreak/1.0" },
+    });
+    if (!geoRes.ok) throw new Error(`Geocode error: HTTP ${geoRes.status}`);
+    const geoRows = await geoRes.json();
+    if (!geoRows.length) throw new Error("Address not found. Try including your borough — e.g. Brooklyn, Manhattan.");
+    lat = geoRows[0].lat;
+    lon = geoRows[0].lon;
+    console.log("[getPlowData] Geocode →", lat, lon, geoRows[0].display_name);
   } catch (err) {
-    console.error("[getPlowData] CSCL fetch failed. URL was:", csclUrl, err);
+    console.error("[getPlowData] Nominatim failed:", err);
     throw err;
   }
 
-  if (!csclRows.length) throw new Error("Street name not recognized.");
-
-  // Pick the segment whose house-number range contains the queried house number.
-  // Falls back to csclRows[0] if no range matches (e.g. street-only input).
-  let bestRow = csclRows[0];
-  if (houseNum > 0) {
-    const match = csclRows.find(row => {
-      const lLow  = parseInt(row.l_low_hn,  10);
-      const lHigh = parseInt(row.l_high_hn, 10);
-      const rLow  = parseInt(row.r_low_hn,  10);
-      const rHigh = parseInt(row.r_high_hn, 10);
-      return (houseNum >= lLow && houseNum <= lHigh) ||
-             (houseNum >= rLow && houseNum <= rHigh);
-    });
-    if (match) bestRow = match;
-    console.log(`[getPlowData] houseNum=${houseNum} → segment physicalid=${bestRow.physicalid} (l:${bestRow.l_low_hn}-${bestRow.l_high_hn} r:${bestRow.r_low_hn}-${bestRow.r_high_hn})`);
-  }
-
-  const physicalid = bestRow.physicalid;
-  const st_label   = bestRow.stname_lab;
-
-  // ── Step 2: PlowNYC physicalid → last plow timestamp ──────────────────────
-  // Confirmed field name from dataset: 'snapshot' (not 'last_visited').
-  // Ordering by snapshot DESC gives the most recent plow record for this segment.
+  // ── Step 2: PlowNYC real-time API → last plow timestamp ──────────────────
+  // VisitedTime is UTC with Z suffix — new Date() parses this correctly.
   const plowUrl =
-    `${PLOWNYC_ENDPOINT}` +
-    `?physical_id=${encodeURIComponent(physicalid)}` +
-    `&$order=snapshot DESC` +
-    `&$limit=1`;
+    `${PLOWNYC_REALTIME}` +
+    `?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}&t=${Date.now()}`;
 
-  let plowRows;
+  let plowData;
   try {
     console.log("[getPlowData] PlowNYC fetch →", plowUrl);
     const plowRes = await fetch(plowUrl);
-    if (!plowRes.ok) {
-      const body = await plowRes.text();
-      console.error("[getPlowData] PlowNYC error body:", body);
-      throw new Error(`PlowNYC error: HTTP ${plowRes.status}`);
-    }
-    plowRows = await plowRes.json();
-    console.table(plowRows);
+    if (!plowRes.ok) throw new Error(`PlowNYC error: HTTP ${plowRes.status}`);
+    plowData = await plowRes.json();
+    console.log("[getPlowData] PlowNYC →", plowData);
   } catch (err) {
-    console.error("[getPlowData] PlowNYC fetch failed. URL was:", plowUrl, err);
+    console.error("[getPlowData] PlowNYC failed:", err);
     throw err;
   }
 
-  // Confirmed field name from dataset inspection: 'snapshot'.
-  const lastVisitedRaw = plowRows[0]?.snapshot ?? null;
-  const lastVisited = lastVisitedRaw ? new Date(lastVisitedRaw) : null;
-  const isPlowed    = lastVisited
-    ? (Date.now() - lastVisited.getTime()) <= 180 * 60 * 1000
+  const lastVisitedRaw = plowData.VisitedTime ?? null;
+  const lastVisited    = lastVisitedRaw ? new Date(lastVisitedRaw) : null;
+  const isPlowed       = lastVisited
+    ? (Date.now() - lastVisited.getTime()) <= THREE_HOURS_MS
     : false;
 
-  return { physicalid, streetName: st_label || streetName, lastVisited, isPlowed };
+  return { streetName: plowData.Street ?? address, lastVisited, isPlowed };
 }
 
 // ─── Jailbreak evaluation ─────────────────────────────────────────────────────
@@ -186,8 +120,8 @@ function Header() {
 
       <p className="mt-3 text-gray-500 font-mono text-xs tracking-widest uppercase">
         Powered by&nbsp;
-        <span className="text-yellow-400">NYC Snow Vehicle Activity</span>
-        &nbsp;•&nbsp; ArcGIS FeatureServer
+        <span className="text-yellow-400">PlowNYC Real-Time API</span>
+        &nbsp;•&nbsp; Live GPS Data
       </p>
     </header>
   );
@@ -359,7 +293,7 @@ function AlertCard({ result }) {
         )}
 
         <p className="mt-5 text-gray-700 text-xs">
-          Source: NYC Snow Vehicle Activity (ArcGIS) · OpenStreetMap Nominatim
+          Source: PlowNYC Real-Time API · OpenStreetMap Nominatim
         </p>
       </div>
     </div>
@@ -468,9 +402,9 @@ function HowItWorks() {
         <p className="text-gray-700 text-xs tracking-widest uppercase mb-3">How it works</p>
         <ol className="space-y-2 text-xs text-gray-600">
           {[
-            "Enter a street name → looked up in NYC Street Centerline (CSCL) for physicalid",
-            "physicalid used to query DSNY PlowNYC dataset for last plow timestamp",
-            "Socrata returns ISO-8601 UTC timestamp — compared against current time",
+            "Enter your NYC address → geocoded to lat/lon via OpenStreetMap Nominatim",
+            "Coordinates sent to PlowNYC real-time API (same data as maps.nyc.gov/snow)",
+            "VisitedTime is UTC — parsed and compared against current time",
             "<3h = cleared · 3–6h = borderline · >6h / no record = snowed in",
           ].map((step, i) => (
             <li key={i}>
@@ -545,7 +479,7 @@ export default function App() {
       </main>
 
       <footer className="border-t border-gray-900 py-4 text-center font-mono text-xs text-gray-700 tracking-widest uppercase">
-        NYC Jailbreak &nbsp;|&nbsp; Data: NYC Snow Vehicle Activity &amp; OpenStreetMap &nbsp;|&nbsp; Not affiliated with NYC
+        NYC Jailbreak &nbsp;|&nbsp; Data: PlowNYC Real-Time API &amp; OpenStreetMap &nbsp;|&nbsp; Not affiliated with NYC
       </footer>
     </div>
   );
