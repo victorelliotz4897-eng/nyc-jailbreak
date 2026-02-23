@@ -1,3 +1,5 @@
+import PartyplaceFooter from "./PartyplaceFooter";
+
 export default function LandingView({
   address,
   loading,
@@ -41,10 +43,7 @@ export default function LandingView({
         </button>
       </form>
 
-      <div className="logo-footer">
-        <span className="logo-circle" />
-        POWERED BY PARTYPLACE.COM
-      </div>
+      <PartyplaceFooter />
     </section>
   );
 }

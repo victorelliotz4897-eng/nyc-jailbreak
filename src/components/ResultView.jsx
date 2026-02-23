@@ -1,3 +1,4 @@
+import PartyplaceFooter from "./PartyplaceFooter";
 import { PARTYPLACE_URL, formatTime } from "../lib/plowApi";
 
 export default function ResultView({ result, onReset }) {
@@ -43,6 +44,8 @@ export default function ResultView({ result, onReset }) {
           FIND A VENUE ON PARTYPLACE -&gt;
         </a>
       </div>
+
+      <PartyplaceFooter className="page-footer" />
     </section>
   );
 }
