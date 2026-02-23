@@ -55,28 +55,44 @@ async function geocodeAddress(address) {
  * Returns the raw ArcGIS JSON response ({ features: [...] }).
  */
 const fetchPlowStatus = async (lat, lng) => {
+  // Build a bounding-box envelope ≈ 150 m around the geocoded point.
+  // esriGeometryEnvelope is more universally supported than esriGeometryPoint+distance,
+  // and avoids "distance/units not supported" errors on some ArcGIS services.
+  const R = 150; // metres radius
+  const latDelta = R / 111320;
+  const lonDelta = R / (111320 * Math.cos(lat * Math.PI / 180));
+
   const geometry = JSON.stringify({
-    x: lng,
-    y: lat,
-    spatialReference: { wkid: 4326 }
+    xmin: lng - lonDelta,
+    ymin: lat - latDelta,
+    xmax: lng + lonDelta,
+    ymax: lat + latDelta,
+    spatialReference: { wkid: 4326 },
   });
 
   const params = new URLSearchParams({
     f:              'json',
     geometry:       geometry,
-    geometryType:   'esriGeometryPoint',
+    geometryType:   'esriGeometryEnvelope',
     spatialRel:     'esriSpatialRelIntersects',
     outFields:      'last_visited,street_name,status',
     inSR:           '4326',
     outSR:          '4326',
-    distance:       '150', // Look within 150 meters (covers geocoder pin-on-roof offset)
-    units:          'esriSRUnit_Meter',
-    returnGeometry: 'false'
+    orderByFields:  'last_visited DESC', // most recently plowed segment first
+    returnGeometry: 'false',
   });
 
   const response = await fetch(`${ARCGIS_SNOW_ENDPOINT}?${params.toString()}`);
-  if (!response.ok) throw new Error(`Server Error: ${response.status}`);
-  return await response.json();
+  if (!response.ok) throw new Error(`ArcGIS server error: HTTP ${response.status}`);
+
+  const data = await response.json();
+
+  // ArcGIS returns errors as JSON with HTTP 200 — surface them explicitly
+  if (data.error) {
+    throw new Error(`ArcGIS error ${data.error.code}: ${data.error.message}`);
+  }
+
+  return data;
 };
 
 /** Fetches plow status and tags the result with _source for evaluateStatus. */
