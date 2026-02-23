@@ -37,6 +37,10 @@ export default function LandingView({
           type="text"
           placeholder="ENTER YOUR NYC ADDRESS..."
           autoComplete="off"
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded={showList}
+          aria-controls="address-suggestion-list"
           value={address}
           onChange={onChange}
           onKeyDown={onKeyDown}
@@ -50,21 +54,27 @@ export default function LandingView({
         </button>
 
         {showList && (
-          <ul className="autocomplete-list" role="listbox" aria-label="Address suggestions">
-            {suggestions.map((label, index) => (
+          <ul
+            id="address-suggestion-list"
+            className="autocomplete-list"
+            role="listbox"
+            aria-label="NYC address suggestions"
+          >
+            {suggestions.map((suggestion, index) => (
               <li
-                key={label}
-                onMouseDown={() => onSelectSuggestion(label)}
+                key={`${suggestion.label}-${index}`}
+                onMouseDown={() => onSelectSuggestion(suggestion)}
                 className={index === activeIdx ? "active" : ""}
                 role="option"
                 aria-selected={index === activeIdx}
               >
-                {label}
+                {suggestion.label}
               </li>
             ))}
           </ul>
         )}
       </form>
+      <p className="search-helper">Start typing to pick an NYC address from the dropdown.</p>
 
       <div className="logo-footer">
         <span className="logo-circle" />

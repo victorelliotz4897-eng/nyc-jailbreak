@@ -217,6 +217,14 @@ h2,
   color: var(--text-light);
 }
 
+.search-helper {
+  margin-top: 0.65rem;
+  font-size: 0.76rem;
+  opacity: 0.55;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .logo-footer {
   margin-top: 4rem;
   font-size: 0.8rem;

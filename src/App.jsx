@@ -7,6 +7,25 @@ import { evaluateStatus, getPlowData } from "./lib/plowApi";
 import "./index.css";
 
 const GEOSEARCH_AUTOCOMPLETE = "https://geosearch.planninglabs.nyc/v2/autocomplete";
+const MIN_AUTOCOMPLETE_CHARS = 2;
+const NYC_LOCATION_HINTS = [
+  "brooklyn",
+  "queens",
+  "manhattan",
+  "bronx",
+  "staten island",
+  "new york county",
+  "kings county",
+  "queens county",
+  "bronx county",
+  "richmond county",
+  "new york, ny",
+];
+
+function isNycSuggestion(label) {
+  const lowerLabel = label.toLowerCase();
+  return NYC_LOCATION_HINTS.some((token) => lowerLabel.includes(token));
+}
 
 export default function App() {
   const [view, setView] = useState("landing"); // "landing" | "result" | "error"
@@ -19,9 +38,11 @@ export default function App() {
   const [suggestions, setSuggestions] = useState([]);
   const [showList, setShowList] = useState(false);
   const [activeIdx, setActiveIdx] = useState(-1);
+  const [selectedSuggestion, setSelectedSuggestion] = useState(null);
 
   const debounceRef = useRef(null);
   const wrapperRef = useRef(null);
+  const requestSeqRef = useRef(0);
 
   useEffect(() => {
     document.body.classList.remove("state-yes", "state-no");
@@ -50,36 +71,79 @@ export default function App() {
     return () => clearTimeout(debounceRef.current);
   }, []);
 
-  function handleChange(event) {
-    const value = event.target.value;
-    setAddress(value);
-    setActiveIdx(-1);
-
-    clearTimeout(debounceRef.current);
-
-    if (value.trim().length < 3) {
+  async function fetchSuggestions(query) {
+    const trimmedQuery = query.trim();
+    if (trimmedQuery.length < MIN_AUTOCOMPLETE_CHARS) {
+      requestSeqRef.current += 1;
       setSuggestions([]);
       setShowList(false);
       return;
     }
 
-    debounceRef.current = setTimeout(async () => {
-      try {
-        const response = await fetch(`${GEOSEARCH_AUTOCOMPLETE}?text=${encodeURIComponent(value)}&size=5`);
-        if (!response.ok) return;
+    const requestSeq = requestSeqRef.current + 1;
+    requestSeqRef.current = requestSeq;
 
-        const data = await response.json();
-        const labels = (data.features ?? []).map((feature) => feature.properties.label);
-        setSuggestions(labels);
-        setShowList(labels.length > 0);
-      } catch {
-        // Intentionally silent: autocomplete failures should not block search.
-      }
-    }, 200);
+    try {
+      const response = await fetch(
+        `${GEOSEARCH_AUTOCOMPLETE}?text=${encodeURIComponent(trimmedQuery)}&size=8`,
+      );
+      if (!response.ok) return;
+
+      const data = await response.json();
+      if (requestSeq !== requestSeqRef.current) return;
+
+      const nextSuggestions = (data.features ?? [])
+        .map((feature) => {
+          const label = feature.properties?.label;
+          const coordinates = feature.geometry?.coordinates;
+          if (!label || !Array.isArray(coordinates) || coordinates.length < 2) {
+            return null;
+          }
+          return {
+            label,
+            lon: coordinates[0],
+            lat: coordinates[1],
+          };
+        })
+        .filter(Boolean)
+        .filter((item) => isNycSuggestion(item.label));
+
+      const uniqueSuggestions = nextSuggestions.filter(
+        (item, index, list) => index === list.findIndex((other) => other.label === item.label),
+      );
+
+      setSuggestions(uniqueSuggestions);
+      setShowList(uniqueSuggestions.length > 0);
+    } catch {
+      if (requestSeq !== requestSeqRef.current) return;
+      setSuggestions([]);
+      setShowList(false);
+    }
   }
 
-  function selectSuggestion(label) {
-    setAddress(label);
+  function handleChange(event) {
+    const value = event.target.value;
+    setAddress(value);
+    setActiveIdx(-1);
+    setSelectedSuggestion(null);
+
+    clearTimeout(debounceRef.current);
+
+    if (value.trim().length < MIN_AUTOCOMPLETE_CHARS) {
+      requestSeqRef.current += 1;
+      setSuggestions([]);
+      setShowList(false);
+      return;
+    }
+
+    debounceRef.current = setTimeout(() => {
+      fetchSuggestions(value);
+    }, 180);
+  }
+
+  function selectSuggestion(suggestion) {
+    setAddress(suggestion.label);
+    setSelectedSuggestion(suggestion);
     setSuggestions([]);
     setShowList(false);
   }
@@ -110,6 +174,18 @@ export default function App() {
     }
   }
 
+  function handleFocus() {
+    const trimmedAddress = address.trim();
+    if (trimmedAddress.length < MIN_AUTOCOMPLETE_CHARS) return;
+
+    if (suggestions.length > 0) {
+      setShowList(true);
+      return;
+    }
+
+    fetchSuggestions(trimmedAddress);
+  }
+
   async function handleSearch(addressQuery) {
     if (!addressQuery.trim() || loading) return;
 
@@ -119,7 +195,7 @@ export default function App() {
 
     try {
       const [plowData] = await Promise.all([
-        getPlowData(addressQuery),
+        getPlowData(addressQuery, selectedSuggestion),
         new Promise((resolve) => setTimeout(resolve, 400)),
       ]);
 
@@ -149,6 +225,7 @@ export default function App() {
       setResult(null);
       setError(null);
       setAddress("");
+      setSelectedSuggestion(null);
       setSuggestions([]);
       setShowList(false);
       setActiveIdx(-1);
@@ -172,7 +249,7 @@ export default function App() {
           onSubmit={handleSubmit}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
-          onFocus={() => suggestions.length > 0 && setShowList(true)}
+          onFocus={handleFocus}
           onSelectSuggestion={selectSuggestion}
         />
       )}

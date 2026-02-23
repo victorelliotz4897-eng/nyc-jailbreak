@@ -6,10 +6,10 @@ const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
 
 export const PARTYPLACE_URL = "https://www.partyplace.com/?ref=nyc-jailbreak";
 
-export async function getPlowData(address) {
+async function geocodeNycAddress(query) {
   const geocodeUrl =
     `${NOMINATIM_ENDPOINT}` +
-    `?q=${encodeURIComponent(`${address}, New York City, NY`)}` +
+    `?q=${encodeURIComponent(query)}` +
     "&format=json&limit=1&countrycodes=us" +
     "&viewbox=-74.2591,40.9176,-73.7004,40.4774&bounded=1";
 
@@ -23,10 +23,38 @@ export async function getPlowData(address) {
 
   const geocodeRows = await geocodeResponse.json();
   if (!geocodeRows.length) {
-    throw new Error("Address not found. Try including your borough - e.g. Brooklyn, Manhattan.");
+    return null;
   }
 
-  const { lat, lon } = geocodeRows[0];
+  return geocodeRows[0];
+}
+
+export async function getPlowData(address, selectedSuggestion = null) {
+  let lat;
+  let lon;
+
+  const hasSelectedCoordinates =
+    selectedSuggestion &&
+    Number.isFinite(selectedSuggestion.lat) &&
+    Number.isFinite(selectedSuggestion.lon) &&
+    selectedSuggestion.label === address;
+
+  if (hasSelectedCoordinates) {
+    lat = selectedSuggestion.lat;
+    lon = selectedSuggestion.lon;
+  } else {
+    const geocodeMatch =
+      (await geocodeNycAddress(address)) ||
+      (await geocodeNycAddress(`${address}, New York City, NY`));
+
+    if (!geocodeMatch) {
+      throw new Error("Address not found. Please choose a NYC suggestion from the dropdown.");
+    }
+
+    lat = geocodeMatch.lat;
+    lon = geocodeMatch.lon;
+  }
+
   const plowUrl = `${PLOWNYC_REALTIME}?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}&t=${Date.now()}`;
 
   const plowResponse = await fetch(plowUrl);
